@@ -2,6 +2,11 @@
     "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools",
     "python.analysis.include": [
         "src/**",
-        "tests/**"
+        "tests/**",
+        "app/**"
+    ],
+    "python.analysis.extraPaths": [
+        "./src",
+        "./app"
     ],
 }

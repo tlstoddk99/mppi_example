@@ -9,12 +9,12 @@ package-dir = {"" = "src"}
 name = "mppi_playground"
 version = "0.1.0"
 description = ""
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 dependencies = [
-    "pandas==2.2.2",
-    "matplotlib==3.8.2",
+    "pandas==2.0.3",
+    "matplotlib==3.7.5",
     "fire==0.5.0",
-    "numpy==1.26.2",
+    "numpy==1.24.4",
     "torch>=2.00",
     "gymnasium[all]==0.29.1",
     "mujoco==2.3.7",
