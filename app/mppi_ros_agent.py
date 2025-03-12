@@ -7,7 +7,9 @@ from math import sin, cos
 import tf.transformations as tft
 
 from nav_msgs.msg import Path, Odometry
+from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import Twist, PoseStamped
+from vision_msgs.msg import Detection2D
 
 # Import your custom modules
 from controller.mppi import MPPI
@@ -17,7 +19,11 @@ from envs.lane_map_2d import LaneMap
 ###############################################################################
 # Helper Functions
 ###############################################################################
-def path_msg_to_tensor(msg: Path) -> torch.Tensor:
+def path_msg_to_numpy(msg: Path) -> np.ndarray:
+    """
+    Converts a nav_msgs/Path message into a numpy array of shape (N, 3)
+    where each row is [x, y, yaw].
+    """
     path_list = []
     for pose_stamped in msg.poses:
         x = pose_stamped.pose.position.x
@@ -26,12 +32,14 @@ def path_msg_to_tensor(msg: Path) -> torch.Tensor:
              pose_stamped.pose.orientation.y,
              pose_stamped.pose.orientation.z,
              pose_stamped.pose.orientation.w]
-        # Convert quaternion to yaw
         _, _, yaw = tft.euler_from_quaternion(q)
         path_list.append([x, y, yaw])
-    return torch.tensor(path_list, dtype=torch.float32)
+    return np.array(path_list)
 
 def odometry_to_state(msg: Odometry) -> torch.Tensor:
+    """
+    Converts a nav_msgs/Odometry message into a torch tensor state [x, y, yaw, v].
+    """
     x = msg.pose.pose.position.x
     y = msg.pose.pose.position.y
     q = [msg.pose.pose.orientation.x,
@@ -39,7 +47,7 @@ def odometry_to_state(msg: Odometry) -> torch.Tensor:
          msg.pose.pose.orientation.z,
          msg.pose.pose.orientation.w]
     _, _, yaw = tft.euler_from_quaternion(q)
-    v = msg.twist.twist.linear.x  # Assuming velocity in x direction
+    v = msg.twist.twist.linear.x  # assume velocity is along x-direction
     return torch.tensor([x, y, yaw, v], dtype=torch.float32)
 
 ###############################################################################
@@ -100,7 +108,7 @@ class racing_controller:
         self._device = device
         self._dtype = dtype
 
-        # These are set via ROS callbacks
+        # These will be set via ROS callbacks
         self.reference_path: torch.Tensor = None
         self.obstacle_map: ObstacleMap = None
         self.lane_map: LaneMap = None
@@ -120,7 +128,7 @@ class racing_controller:
         end = time.time()
         solve_time = end - start
         if self.debug:
-            print("solve time: {} [ms]".format(round(solve_time*1000, 2)))
+            print("solve time: {} [ms]".format(round(solve_time * 1000, 2)))
         return action_seq, state_seq
 
     def get_top_samples(self, num_samples=300):
@@ -133,7 +141,6 @@ class racing_controller:
     def cost_function(self, state: torch.Tensor, action: torch.Tensor, info: dict):
         prev_action = info["prev_action"]
         t = info["t"]
-        # Compute contouring and lag errors based on the reference path
         ec = torch.sin(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
              torch.cos(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
         el = -torch.cos(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
@@ -177,19 +184,22 @@ class RacingControllerROSNode:
     def __init__(self):
         rospy.init_node('racing_controller_node', anonymous=True)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Data placeholders for incoming messages
+        self.global_path_np = None         # numpy array for lane centerline
+        self.left_lane_width = None        # list or array from left lane width
+        self.right_lane_width = None       # list or array from right lane width
+        self.current_state = None
+        self.obstacle_map = None
+
         # Subscribers
-        rospy.Subscriber("global_path", Path, self.global_path_callback)
-        rospy.Subscriber("vehicle_state", Odometry, self.vehicle_state_callback)
-        rospy.Subscriber("lane_info", Path, self.lane_info_callback)
-        rospy.Subscriber("obstacle_info", Path, self.obstacle_info_callback)
+        rospy.Subscriber("/global_path", Path, self.global_path_callback)
+        rospy.Subscriber("/vehicle_state", Odometry, self.vehicle_state_callback)
+        rospy.Subscriber("/left_lane_width", Float64MultiArray, self.left_lane_width_callback)
+        rospy.Subscriber("/right_lane_width", Float64MultiArray, self.right_lane_width_callback)
+        rospy.Subscriber("/obstacle_info", Detection2D, self.obstacle_info_callback)
+
         # Publisher for control command
         self.cmd_pub = rospy.Publisher("control_cmd", Twist, queue_size=1)
-
-        # Data placeholders updated via callbacks
-        self.global_path = None
-        self.current_state = None
-        self.lane_map = None
-        self.obstacle_map = None
 
         # Create dummy environment and controller instance
         self.env = DummyEnv()
@@ -199,48 +209,67 @@ class RacingControllerROSNode:
         self.timer = rospy.Timer(rospy.Duration(0.05), self.control_loop)
 
     def global_path_callback(self, msg: Path):
-        self.global_path = path_msg_to_tensor(msg)
+        self.global_path_np = path_msg_to_numpy(msg)
+        self.update_lane_map()
 
     def vehicle_state_callback(self, msg: Odometry):
         self.current_state = odometry_to_state(msg)
 
-    def lane_info_callback(self, msg: Path):
-        # Convert lane info to a tensor then to a numpy array
-        lane_tensor = path_msg_to_tensor(msg)
-        lane_np = lane_tensor.cpu().numpy()
-        # Create LaneMap with a default lane width (e.g., 1.0)
-        self.lane_map = LaneMap(lane_np, lane_width=1.0, map_size=(20, 20), cell_size=0.01,
-                                device=self._device, dtype=torch.float32)
-        # Update controller cost map if obstacle map is ready
-        if self.obstacle_map is not None:
-            self.controller.set_cost_map(self.obstacle_map, self.lane_map)
+    def left_lane_width_callback(self, msg: Float64MultiArray):
+        # msg.data is a list of floats
+        self.left_lane_width = list(msg.data)
+        self.update_lane_map()
 
-    def obstacle_info_callback(self, msg: Path):
-        # Create a new ObstacleMap instance
+    def right_lane_width_callback(self, msg: Float64MultiArray):
+        self.right_lane_width = list(msg.data)
+        self.update_lane_map()
+
+    def update_lane_map(self):
+        """
+        Create or update the LaneMap if global path and both lane widths are available.
+        The average lane width is computed element-wise and then averaged.
+        """
+        if self.global_path_np is not None and self.left_lane_width is not None and self.right_lane_width is not None:
+            left_array = np.array(self.left_lane_width)
+            right_array = np.array(self.right_lane_width)
+            avg_widths = (left_array + right_array) / 2.0
+            avg_lane_width = float(np.mean(avg_widths))
+            # Create the LaneMap using the global path as the lane centerline
+            self.lane_map = LaneMap(self.global_path_np, lane_width=avg_lane_width, map_size=(20, 20), cell_size=0.01,
+                                    device=self._device, dtype=torch.float32)
+            # Update controller cost map if obstacle map is ready
+            if self.obstacle_map is not None:
+                self.controller.set_cost_map(self.obstacle_map, self.lane_map)
+
+    def obstacle_info_callback(self, msg: Detection2D):
+        """
+        Process a vision_msgs/Detection2D message. Extract the bounding box info and create a new ObstacleMap.
+        """
         self.obstacle_map = ObstacleMap(map_size=(20, 20), cell_size=0.01,
                                         device=self._device, dtype=torch.float32)
-        # Assume each pose represents a circle obstacle with a default radius (e.g., 0.5)
-        default_radius = 0.5
-        for pose_stamped in msg.poses:
-            x = pose_stamped.pose.position.x
-            y = pose_stamped.pose.position.y
-            center = np.array([x, y])
-            self.obstacle_map.add_circle_obstacle(center, default_radius)
-        # Convert the occupancy map to a torch tensor for cost computation
+        # Extract bounding box info from the detection
+        # detection.bbox is of type BoundingBox2D: it has center (Point2D) and size (Vector2)
+        x = msg.bbox.center.x
+        y = msg.bbox.center.y
+        width = msg.bbox.size.x
+        height = msg.bbox.size.y
+        # Add rectangle obstacle (ignoring rotation; extend if needed)
+        self.obstacle_map.add_rectangle_obstacle(np.array([x, y]), width, height)
         self.obstacle_map.convert_to_torch()
         # Update controller cost map if lane map is ready
         if self.lane_map is not None:
             self.controller.set_cost_map(self.obstacle_map, self.lane_map)
 
     def control_loop(self, event):
-        if self.current_state is None or self.global_path is None or \
-           self.lane_map is None or self.obstacle_map is None:
-            rospy.loginfo("Waiting for vehicle_state, global_path, lane_info, and obstacle_info...")
+        if self.current_state is None or self.global_path_np is None or self.lane_map is None or self.obstacle_map is None:
+            rospy.loginfo("Waiting for vehicle_state, global_path, left/right lane widths, and obstacle_info...")
             return
 
         try:
-            action_seq, state_seq = self.controller.update(self.current_state, self.global_path)
-            # Use the first control action [acceleration, steering]
+            # Convert global path (numpy array) to a torch tensor for planning.
+            global_path_tensor = torch.tensor(self.global_path_np, dtype=torch.float32, device=self._device)
+            action_seq, state_seq = self.controller.update(self.current_state, global_path_tensor)
+            # Publish first control action
             action = action_seq[0]
             cmd_msg = Twist()
             cmd_msg.linear.x = action[0].item()
