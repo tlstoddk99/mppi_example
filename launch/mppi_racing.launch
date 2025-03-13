@@ -1,0 +1,53 @@
+<launch>
+  <!-- Launch the racing controller node -->
+  <node pkg="your_package" type="mppi_ros_agent.py" name="mppi_ros_agent" output="screen">
+    
+    <!-- Dynamics and vehicle limits -->
+    <param name="v_max" value="10.0" />
+    <param name="u_min_accel" value="-1.0" />
+    <param name="u_min_steer" value="-0.5" />
+    <param name="u_max_accel" value="1.0" />
+    <param name="u_max_steer" value="0.5" />
+    
+    <!-- MPPI parameters -->
+    <param name="mppi/horizon" value="25" />
+    <param name="mppi/num_samples" value="4000" />
+    <param name="mppi/sigma_accel" value="0.5" />
+    <param name="mppi/sigma_steer" value="0.1" />
+    <param name="mppi/lambda" value="1.0" />
+    <param name="mppi/auto_lambda" value="false" />
+    
+    <!-- Cost function weights -->
+    <param name="cost/Qc" value="2.0" />
+    <param name="cost/Ql" value="3.0" />
+    <param name="cost/Qv" value="2.0" />
+    <param name="cost/Qo" value="10000.0" />
+    <param name="cost/Qin" value="0.01" />
+    <param name="cost/Qdin" value="0.5" />
+    
+    <!-- Curvature-based speed control parameters -->
+    <param name="use_curvature_speed" value="false" />
+    <param name="min_curve_speed" value="2.0" />
+    <param name="curvature_speed_factor" value="5.0" />
+    
+    <!-- Reference trajectory parameters -->
+    <param name="lookahead_distance" value="3.0" />
+    <param name="reference_path_interval" value="0.85" />
+    
+    <!-- Control loop and data timeouts -->
+    <param name="control_rate" value="10.0" />
+    <param name="state_timeout" value="1.0" />
+    <param name="path_timeout" value="5.0" />
+    <param name="obstacle_timeout" value="1.0" />
+    
+    <!-- Obstacle map parameters -->
+    <param name="map_size_x" value="20" />
+    <param name="map_size_y" value="20" />
+    <param name="cell_size" value="0.01" />
+    
+    <!-- CUDA and debug parameters -->
+    <param name="use_cuda" value="true" />
+    <param name="debug" value="true" />
+    
+  </node>
+</launch>

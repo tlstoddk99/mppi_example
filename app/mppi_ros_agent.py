@@ -84,7 +84,7 @@ class DummyEnv:
 # Racing Controller
 ###############################################################################
 class racing_controller:
-    def __init__(self, env, debug=False, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), dtype=torch.float32):
+    def __init__(self, env, debug=True, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), dtype=torch.float32):
         self.debug = debug
         self.current_path_index = 0
 
@@ -262,7 +262,7 @@ class racing_controller:
 ###############################################################################
 class RacingControllerROSNode:
     def __init__(self):
-        rospy.init_node('racing_controller_node', anonymous=True)
+        rospy.init_node('mppi_controller', anonymous=True)
         
         # Get device configuration
         use_cuda = rospy.get_param('~use_cuda', True)
@@ -313,6 +313,13 @@ class RacingControllerROSNode:
         
         rospy.loginfo("Racing controller node initialized successfully")
 
+    def vehicle_state_callback(self, msg: Odometry):
+        try:
+            self.current_state = odometry_to_state(msg)
+            self.last_state_time = rospy.Time.now()
+        except Exception as e:
+            rospy.logerr(f"Error in vehicle_state_callback: {e}")
+            
     def global_path_callback(self, msg: Path):
         try:
             if len(msg.poses) < 2:
@@ -326,13 +333,6 @@ class RacingControllerROSNode:
         except Exception as e:
             rospy.logerr(f"Error in global_path_callback: {e}")
 
-    def vehicle_state_callback(self, msg: Odometry):
-        try:
-            self.current_state = odometry_to_state(msg)
-            self.last_state_time = rospy.Time.now()
-        except Exception as e:
-            rospy.logerr(f"Error in vehicle_state_callback: {e}")
-
     def left_lane_width_callback(self, msg: Float64MultiArray):
         # msg.data is a list of floats
         self.left_lane_width = list(msg.data)
@@ -345,19 +345,71 @@ class RacingControllerROSNode:
     def update_lane_map(self):
         """
         Create or update the LaneMap if global path and both lane widths are available.
-        The average lane width is computed element-wise and then averaged.
+        Uses point-specific lane widths when available.
         """
-        if self.global_path_np is not None and self.left_lane_width is not None and self.right_lane_width is not None:
+        if self.global_path_np is None or self.left_lane_width is None or self.right_lane_width is None:
+            return
+
+        try:
             left_array = np.array(self.left_lane_width)
             right_array = np.array(self.right_lane_width)
-            avg_widths = (left_array + right_array) / 2.0
-            avg_lane_width = float(np.mean(avg_widths))
-            # Create the LaneMap using the global path as the lane centerline
-            self.lane_map = LaneMap(self.global_path_np, lane_width=avg_lane_width, map_size=(20, 20), cell_size=0.01,
-                                    device=self._device, dtype=torch.float32)
+            
+            # Validate array dimensions
+            if len(left_array) != len(right_array):
+                rospy.logwarn(f"Lane width arrays have different lengths: left={len(left_array)}, right={len(right_array)}")
+                # Use the shorter length
+                min_length = min(len(left_array), len(right_array))
+                left_array = left_array[:min_length]
+                right_array = right_array[:min_length]
+            
+            # Calculate point-specific widths
+            point_widths = (left_array + right_array) / 2.0
+            
+            # If widths don't match path length, handle appropriately
+            if len(point_widths) != len(self.global_path_np):
+                rospy.loginfo(f"Lane width count ({len(point_widths)}) doesn't match path points ({len(self.global_path_np)})")
+                # Option 1: Use average width for the entire path
+                avg_lane_width = float(np.mean(point_widths))
+                self.lane_map = LaneMap(
+                    self.global_path_np, 
+                    lane_width=avg_lane_width, 
+                    map_size=(20, 20), 
+                    cell_size=0.01,
+                    device=self._device, 
+                    dtype=torch.float32
+                )
+            else:
+                # Option 2: Use point-specific widths if supported by LaneMap
+                # Check if LaneMap supports variable widths
+                if hasattr(LaneMap, 'supports_variable_width') and LaneMap.supports_variable_width:
+                    self.lane_map = LaneMap(
+                        self.global_path_np, 
+                        lane_width=point_widths, 
+                        map_size=(20, 20), 
+                        cell_size=0.01,
+                        device=self._device, 
+                        dtype=torch.float32
+                    )
+                else:
+                    # Fall back to average width
+                    avg_lane_width = float(np.mean(point_widths))
+                    self.lane_map = LaneMap(
+                        self.global_path_np, 
+                        lane_width=avg_lane_width, 
+                        map_size=(20, 20), 
+                        cell_size=0.01,
+                        device=self._device, 
+                        dtype=torch.float32
+                    )
+            
             # Update controller cost map if obstacle map is ready
             if self.obstacle_map is not None:
                 self.controller.set_cost_map(self.obstacle_map, self.lane_map)
+                
+            rospy.loginfo("Lane map updated successfully")
+                
+        except Exception as e:
+            rospy.logerr(f"Error in update_lane_map: {e}")
 
     def obstacle_info_callback(self, msg: Detection2DArray):
         """
