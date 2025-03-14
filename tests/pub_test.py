@@ -11,6 +11,7 @@ from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import Twist, PoseStamped, Quaternion
 from vision_msgs.msg import Detection2DArray, Detection2D, BoundingBox2D, ObjectHypothesisWithPose
 from std_srvs.srv import Empty, EmptyResponse
+from visualization_msgs.msg import Marker, MarkerArray 
 
 from envs.racing_env import RacingEnv
 from envs.obstacle_map_2d import ObstacleMap, generate_random_obstacles
@@ -43,6 +44,8 @@ class MPPITestPublisher:
         self.right_lane_width_pub = rospy.Publisher('/right_lane_width', Float64MultiArray, queue_size=1, latch=True)
         self.vehicle_state_pub = rospy.Publisher('/vehicle_state', Odometry, queue_size=1)
         self.obstacle_info_pub = rospy.Publisher('/obstacle_info', Detection2DArray, queue_size=1)
+        self.lane_marker_pub = rospy.Publisher('/lane_markers', MarkerArray, queue_size=1, latch=True) 
+        self.obstacle_marker_pub = rospy.Publisher('/obstacle_markers', MarkerArray, queue_size=1, latch=True)  
         
         rospy.Subscriber('/cmd_vel', Twist, self.cmd_vel_callback)
         rospy.loginfo("Manual control enabled - listening on /cmd_vel")
@@ -53,6 +56,8 @@ class MPPITestPublisher:
         
         self.state_timer = rospy.Timer(rospy.Duration(1.0/self.update_rate), self.publish_vehicle_state)
         self.obstacle_timer = rospy.Timer(rospy.Duration(1.0/self.obstacle_update_rate), self.publish_obstacle_info)
+        self.lane_marker_timer = rospy.Timer(rospy.Duration(1.0/self.update_rate), self.publish_lane_visualization)  # added timer for lane visualization
+        self.obstacle_marker_timer = rospy.Timer(rospy.Duration(1.0/self.update_rate), self.publish_obstacle_visualization)  # added timer for obstacle markers
         
         self.publish_global_path()
         self.publish_lane_widths()
@@ -290,15 +295,110 @@ class MPPITestPublisher:
     def handle_reset_service(self, req):
         self.reset_vehicle()
         return EmptyResponse()
+    
+    def publish_lane_visualization(self, event):
+        from geometry_msgs.msg import Point  # local import
+        if not (hasattr(self, 'left_lane') and hasattr(self, 'right_lane')):
+            rospy.logwarn("Lane data not available for visualization")
+            return
+        
+        left_marker = Marker()
+        left_marker.header.stamp = rospy.Time.now()
+        left_marker.header.frame_id = "map"
+        left_marker.ns = "lane"
+        left_marker.id = 1
+        left_marker.type = Marker.LINE_STRIP
+        left_marker.action = Marker.ADD
+        left_marker.scale.x = 0.1
+        left_marker.color.r = 0.0
+        left_marker.color.g = 1.0
+        left_marker.color.b = 0.0
+        left_marker.color.a = 1.0
+        for pt in self.left_lane:
+            p = Point()
+            p.x = pt[0]
+            p.y = pt[1]
+            p.z = 0.0
+            left_marker.points.append(p)
+        if len(self.left_lane) > 0:
+            p = Point()
+            p.x = self.left_lane[0][0]
+            p.y = self.left_lane[0][1]
+            p.z = 0.0
+            left_marker.points.append(p)
+        
+        right_marker = Marker()
+        right_marker.header.stamp = rospy.Time.now()
+        right_marker.header.frame_id = "map"
+        right_marker.ns = "lane"
+        right_marker.id = 2
+        right_marker.type = Marker.LINE_STRIP
+        right_marker.action = Marker.ADD
+        right_marker.scale.x = 0.1
+        right_marker.color.r = 0.0
+        right_marker.color.g = 1.0
+        right_marker.color.b = 0.0
+        right_marker.color.a = 1.0
+        for pt in self.right_lane:
+            p = Point()
+            p.x = pt[0]
+            p.y = pt[1]
+            p.z = 0.0
+            right_marker.points.append(p)
+        if len(self.right_lane) > 0:
+            p = Point()
+            p.x = self.right_lane[0][0]
+            p.y = self.right_lane[0][1]
+            p.z = 0.0
+            right_marker.points.append(p)
+        
+        marker_array = MarkerArray()
+        marker_array.markers.append(left_marker)
+        marker_array.markers.append(right_marker)
+        self.lane_marker_pub.publish(marker_array)
+        # rospy.loginfo("Published lane visualization markers")
+
+    def publish_obstacle_visualization(self, event):
+          # ensure Marker is available
+        marker_array = MarkerArray()
+        now = rospy.Time.now()
+        for idx, obs in enumerate(self.obstacles):
+            marker = Marker()
+            marker.header.stamp = now
+            marker.header.frame_id = "map"
+            marker.ns = "obstacle"
+            marker.id = idx
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            # Set the marker's position using the obstacle's data
+            marker.pose.position.x = float(obs[0])
+            marker.pose.position.y = float(obs[1])
+            marker.pose.position.z = 0.0
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = 0.0
+            marker.pose.orientation.z = 0.0
+            marker.pose.orientation.w = 1.0
+            # Use the obstacle radius for scale (diameter is 2*radius)
+            radius = float(obs[2])
+            marker.scale.x = radius * 2
+            marker.scale.y = radius * 2
+            marker.scale.z = radius * 2
+            # Set a distinct color (red)
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 0.8
+            marker_array.markers.append(marker)
+        self.obstacle_marker_pub.publish(marker_array)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='MPPI Test Publisher')
     parser.add_argument('--manual_control', action='store_true', help='Enable manual control via /cmd_vel')
-    parser.add_argument('--num_obstacles', type=int, default=0, help='Number of obstacles to generate')
+    parser.add_argument('--num_obstacles', type=int, default=5, help='Number of obstacles to generate')
     parser.add_argument('--update_rate', type=float, default=10.0, help='Vehicle state update rate in Hz')
     parser.add_argument('--obstacle_update_rate', type=float, default=10.0, help='Obstacle update rate in Hz')
-    parser.add_argument('--obstacle_movement_prob', type=float, default=0.0, help='Probability of obstacle movement per update')
-    parser.add_argument('--obstacle_max_movement', type=float, default=0.0, help='Maximum obstacle movement distance per update')
+    parser.add_argument('--obstacle_movement_prob', type=float, default=0.001, help='Probability of obstacle movement per update')
+    parser.add_argument('--obstacle_max_movement', type=float, default=0.2, help='Maximum obstacle movement distance per update')
     return parser.parse_args()
         
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ class racing_controller:
         # solver
         self.solver = MPPI(
             horizon=25,
-            num_samples=4000,
+            num_samples=4000000,
             dim_state=4,
             dim_control=2,
             dynamics=env.dynamics,
@@ -32,6 +32,7 @@ class racing_controller:
             sigmas=torch.tensor([0.5, 0.1]),
             lambda_=1.0,
             auto_lambda=False,
+            device=device,
         )
 
         # config
@@ -45,11 +46,14 @@ class racing_controller:
         self.Qin = 0.01  # input cost
         self.Qdin = 0.5  # differential input cost
 
-        # device and dtype
-        if torch.cuda.is_available() and device == torch.device("cuda"):
-            self._device = torch.device("cuda")
-        else:
-            self._device = torch.device("cpu")
+        # # device and dtype
+        # if torch.cuda.is_available() and device == torch.device("cuda"):
+        #     self._device = torch.device("cuda")
+        # else:
+        #     self._device = torch.device("cpu")
+        
+        self._device = torch.device("cpu")
+        
         self._dtype = dtype
 
         # reference indformation (tensor)
@@ -192,10 +196,12 @@ class racing_controller:
 
 
 def main(save_mode: bool = False):
-    env = RacingEnv()
+    device= torch.device("cpu")
+    # device = torch.device("cuda") 
+    env = RacingEnv(device=device)
 
     # controller
-    controller = racing_controller(env, debug=True)
+    controller = racing_controller(env, debug=True, device= device)
     controller.set_cost_map(env._obstacle_map, env._lane_map)
 
     state = env.reset()

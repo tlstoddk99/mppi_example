@@ -61,11 +61,11 @@ class VehicleModel:
     """
     def __init__(self):
         # Load parameters from ROS parameter server with defaults
-        self.V_MAX = rospy.get_param('~v_max', 2.0)
-        u_min_accel = rospy.get_param('~u_min_accel', -2.0)
-        u_min_steer = rospy.get_param('~u_min_steer', -0.25)
-        u_max_accel = rospy.get_param('~u_max_accel', 2.0)
-        u_max_steer = rospy.get_param('~u_max_steer', 0.25)
+        self.V_MAX = 20.0
+        u_min_accel = -2.0 
+        u_min_steer = -0.25
+        u_max_accel = 2.0
+        u_max_steer = 0.25
         
         self.u_min = torch.tensor([u_min_accel, u_min_steer], dtype=torch.float32)
         self.u_max = torch.tensor([u_max_accel, u_max_steer], dtype=torch.float32)
@@ -126,6 +126,7 @@ class RacingController:
             sigmas=torch.tensor([0.5, 0.1]),
             lambda_=1.0,
             auto_lambda=False,
+            device=device,
         )
 
         self.vehicle_model = vehicle_model
@@ -265,8 +266,10 @@ class RacingControllerROSNode:
         rospy.init_node('mppi_racing_controller', anonymous=True)
         
         # Get device configuration
-        use_cuda = rospy.get_param('~use_cuda', torch.cuda.is_available())
+        # use_cuda = rospy.get_param('~use_cuda', torch.cuda.is_available())
+        use_cuda=True
         self._device = torch.device("cuda" if torch.cuda.is_available() and use_cuda else "cpu")
+        # self._device = torch.device("cpu")
         rospy.loginfo(f"Using device: {self._device}")
         
         # Data placeholders for incoming messages
@@ -518,10 +521,6 @@ class RacingControllerROSNode:
 
             action_seq, state_seq = self.controller.update(self.current_state, self.global_path_tensor)
             
-            compute_time = time.time() - start_time
-            rospy.loginfo(f"Control loop compute time2: {compute_time:.3f}s")
-            
-            
             if action_seq is not None and state_seq is not None:
                 action = action_seq[0].detach().cpu()
                 
@@ -547,11 +546,11 @@ class RacingControllerROSNode:
         except Exception as e:
             rospy.logerr(f"Control loop error: {e}")
             
-        compute_time = time.time() - start_time
-        rospy.loginfo(f"Control loop compute time[ms]: {compute_time * 1000:.3f} [ms]")
+        control_loop_time = time.time() - start_time
+        # rospy.loginfo(f"Control loop compute time[ms]: {compute_time * 1000:.3f} [ms]")
         
-        if compute_time > 0.09:
-            rospy.logwarn_throttle(1.0, f"Control loop taking too long: {compute_time:.3f}s")
+        if control_loop_time > 0.1:
+            rospy.logwarn_throttle(1.0, f"\n\nControl loop taking too long: {control_loop_time:.3f}s")
 
 if __name__ == "__main__":
     try:

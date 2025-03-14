@@ -78,9 +78,9 @@ class RacingEnv:
             random_y_range=(-35, 35),
             num_circle_obs=10,
             radius_range=(0.9, 1.2),
-            num_rectangle_obs=10,
-            width_range=(1.5, 2.0),
-            height_range=(1.5, 2.0),
+            num_rectangle_obs=40,
+            width_range=(2.5, 4.0),
+            height_range=(2.5, 4.0),
             max_iteration=1000,
             seed=seed,
         )
