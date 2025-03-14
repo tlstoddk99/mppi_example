@@ -52,39 +52,64 @@ def odometry_to_state(msg: Odometry) -> torch.Tensor:
     return torch.tensor([x, y, yaw, v], dtype=torch.float32)
 
 ###############################################################################
-# Dummy Environment
+# Vehicle Model
 ###############################################################################
-class DummyEnv:
+class VehicleModel:
+    """
+    Simple vehicle model for MPPI controller.
+    Handles dynamics and control constraints.
+    """
     def __init__(self):
         # Load parameters from ROS parameter server with defaults
-        self.V_MAX = rospy.get_param('~v_max', 10.0)
-        u_min_accel = rospy.get_param('~u_min_accel', -1.0)
-        u_min_steer = rospy.get_param('~u_min_steer', -0.5)
-        u_max_accel = rospy.get_param('~u_max_accel', 1.0)
-        u_max_steer = rospy.get_param('~u_max_steer', 0.5)
+        self.V_MAX = rospy.get_param('~v_max', 8.0)
+        u_min_accel = rospy.get_param('~u_min_accel', -2.0)
+        u_min_steer = rospy.get_param('~u_min_steer', -0.25)
+        u_max_accel = rospy.get_param('~u_max_accel', 2.0)
+        u_max_steer = rospy.get_param('~u_max_steer', 0.25)
         
         self.u_min = torch.tensor([u_min_accel, u_min_steer], dtype=torch.float32)
         self.u_max = torch.tensor([u_max_accel, u_max_steer], dtype=torch.float32)
-        self.dynamics = self.simple_dynamics
-        # These will be updated via ROS callbacks
-        self._obstacle_map = None
-        self._lane_map = None
+        
+        # Model parameters (from racing_env.py)
+        self.L = torch.tensor(1.0, dtype=torch.float32)
 
-    def simple_dynamics(self, state, control):
-        dt = 0.1
-        x, y, yaw, v = state
-        a, delta = control
-        x_new = x + v * torch.cos(yaw) * dt
-        y_new = y + v * torch.sin(yaw) * dt
-        yaw_new = yaw + delta * dt
-        v_new = v + a * dt
-        return torch.tensor([x_new, y_new, yaw_new, v_new], dtype=torch.float32)
+    def dynamics(self, state, control, delta_t=0.1):
+        """Simple bicycle model dynamics"""
+        x = state[:, 0].view(-1, 1)
+        y = state[:, 1].view(-1, 1)
+        theta = state[:, 2].view(-1, 1)
+        v = state[:, 3].view(-1, 1)
+        
+        # Convert clamp bounds to state.device
+        u_min = self.u_min.to(state.device)
+        u_max = self.u_max.to(state.device)
+        accel = torch.clamp(control[:, 0].view(-1, 1), u_min[0], u_max[0])
+        steer = torch.clamp(control[:, 1].view(-1, 1), u_min[1], u_max[1])
+        
+        # Normalize angle
+        theta = ((theta + torch.pi) % (2 * torch.pi)) - torch.pi
+        
+        dx = v * torch.cos(theta)
+        dy = v * torch.sin(theta)
+        dtheta = v * torch.tan(steer) / self.L
+        dv = accel
+        
+        new_x = x + dx * delta_t
+        new_y = y + dy * delta_t
+        new_theta = ((theta + dtheta * delta_t + torch.pi) % (2 * torch.pi)) - torch.pi
+        new_v = torch.clamp(v + dv * delta_t, -self.V_MAX, self.V_MAX)
+        
+        return torch.cat([new_x, new_y, new_theta, new_v], dim=1)
 
 ###############################################################################
 # Racing Controller
 ###############################################################################
-class racing_controller:
-    def __init__(self, env, debug=True, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), dtype=torch.float32):
+class RacingController:
+    """
+    Racing controller using MPPI for autonomous racing.
+    Based on the racing_controller from racing.py
+    """
+    def __init__(self, vehicle_model, debug=True, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), dtype=torch.float32):
         self.debug = debug
         self.current_path_index = 0
 
@@ -100,16 +125,16 @@ class racing_controller:
             num_samples=num_samples,
             dim_state=4,
             dim_control=2,
-            dynamics=env.dynamics,
+            dynamics=vehicle_model.dynamics,
             cost_func=self.cost_function,
-            u_min=env.u_min,
-            u_max=env.u_max,
+            u_min=vehicle_model.u_min,
+            u_max=vehicle_model.u_max,
             sigmas=torch.tensor([sigma_accel, sigma_steer]),
             lambda_=lambda_value,
             auto_lambda=rospy.get_param('~mppi/auto_lambda', False),
         )
 
-        self.env = env
+        self.vehicle_model = vehicle_model
 
         # Cost weights from ROS parameters
         self.Qc = rospy.get_param('~cost/Qc', 2.0)
@@ -123,16 +148,14 @@ class racing_controller:
         self._dtype = dtype
 
         # These will be set via ROS callbacks
-        self.reference_path: torch.Tensor = None
-        self.obstacle_map: ObstacleMap = None
-        self.lane_map: LaneMap = None
-        
-        # Path curvature-based speed control
-        self.use_curvature_speed = rospy.get_param('~use_curvature_speed', False)
-        self.min_curve_speed = rospy.get_param('~min_curve_speed', 2.0)
-        self.curvature_speed_factor = rospy.get_param('~curvature_speed_factor', 5.0)
+        self.reference_path = None
+        self.obstacle_map = None
+        self.lane_map = None
 
     def update(self, state: torch.Tensor, racing_center_path: torch.Tensor):
+        """
+        Update controller with current state and generate optimal control sequence.
+        """
         try:
             # Calculate reference trajectory along the global path
             self.reference_path, self.current_path_index = self.calc_ref_trajectory(
@@ -142,7 +165,9 @@ class racing_controller:
                 reference_path_interval=rospy.get_param('~reference_path_interval', 0.85)
             )
 
-            if self.reference_path is None:
+            if self.reference_path is not None:
+                self.reference_path = self.reference_path.to(state.device)
+            else:
                 rospy.logwarn("Reference path not available yet.")
                 return None, None
                 
@@ -154,10 +179,6 @@ class racing_controller:
                 rospy.logwarn("Lane map not available yet.")
                 return None, None
 
-            # Adjust speed based on path curvature if enabled
-            if self.use_curvature_speed and racing_center_path.shape[0] > 2:
-                self.adjust_speed_for_curvature(racing_center_path)
-
             start = time.time()
             action_seq, state_seq = self.solver.forward(state=state)
             end = time.time()
@@ -168,90 +189,66 @@ class racing_controller:
         except Exception as e:
             rospy.logerr(f"Error in controller update: {e}")
             return None, None
-    
-    def adjust_speed_for_curvature(self, path: torch.Tensor):
-        """Adjust target speed based on path curvature"""
-        if path.shape[0] < 3 or not self.use_curvature_speed:
-            return
-            
-        # Calculate approximated curvatures for a portion of the path
-        look_ahead = min(30, path.shape[0])
-        curvatures = []
-        
-        for i in range(1, look_ahead-1):
-            # Simple curvature approximation from three consecutive points
-            p1 = path[i-1, :2]
-            p2 = path[i, :2]
-            p3 = path[i+1, :2]
-            
-            # Calculate vectors
-            v1 = p2 - p1
-            v2 = p3 - p2
-            
-            # Cross product approximation for curvature
-            cross = torch.abs(v1[0]*v2[1] - v1[1]*v2[0])
-            
-            # Normalize by magnitudes
-            mag1 = torch.norm(v1)
-            mag2 = torch.norm(v2)
-            
-            if mag1 > 1e-6 and mag2 > 1e-6:
-                curvature = cross / (mag1 * mag2)
-                curvatures.append(curvature.item())
-            else:
-                curvatures.append(0.0)
-        
-        if curvatures:
-            # Use maximum curvature in the lookahead window to adjust speed
-            max_curve = max(curvatures)
-            curve_speed = max(self.min_curve_speed, 
-                             self.env.V_MAX - self.curvature_speed_factor * max_curve)
-            
-            # Apply the curvature-based speed to the reference path
-            for i in range(self.reference_path.shape[0]):
-                self.reference_path[i, 3] = min(self.reference_path[i, 3], curve_speed)
 
     def get_top_samples(self, num_samples=300):
+        """Get top trajectories from the MPPI solver"""
         return self.solver.get_top_samples(num_samples=num_samples)
 
     def set_cost_map(self, obstacle_map: ObstacleMap, lane_map: LaneMap):
+        """Set maps for cost computation"""
         self.obstacle_map = obstacle_map
         self.lane_map = lane_map
 
     def cost_function(self, state: torch.Tensor, action: torch.Tensor, info: dict):
+        """Cost function for MPPI optimization"""
         prev_action = info["prev_action"]
         t = info["t"]
+        
+        # Cross-track and lateral errors
         ec = torch.sin(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
              torch.cos(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
         el = -torch.cos(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
              torch.sin(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
         path_cost = self.Qc * ec.pow(2) + self.Ql * el.pow(2)
+        
+        # Velocity error
         v = state[:, 3]
-        v_target = self.reference_path[t, 3] if self.reference_path.shape[1] > 3 else self.env.V_MAX
+        v_target = self.reference_path[t, 3] if self.reference_path.shape[1] > 3 else self.vehicle_model.V_MAX
         velocity_cost = self.Qv * (v - v_target).pow(2)
+        
+        # Obstacle and lane boundary costs
         pos_batch = state[:, :2].unsqueeze(1)
         obstacle_cost = self.obstacle_map.compute_cost(pos_batch).squeeze(1)
         obstacle_cost += self.lane_map.compute_cost(pos_batch).squeeze(1)
         obstacle_cost = self.Qo * obstacle_cost
+        
+        # Input regularization costs
         input_cost = self.Qin * action.pow(2).sum(dim=1)
         input_cost += self.Qdin * (action - prev_action).pow(2).sum(dim=1)
+        
+        # Total cost
         cost = path_cost + velocity_cost + obstacle_cost + input_cost
         return cost
 
     def calc_ref_trajectory(self, state: torch.Tensor, path: torch.Tensor, cind: int, horizon: int,
                             DL=0.1, lookahead_distance=1.0, reference_path_interval=0.5):
+        """Calculate reference trajectory from global path"""
         ncourse = len(path)
         xref = torch.zeros((horizon + 1, state.shape[0]), dtype=state.dtype, device=state.device)
+        
+        # Find nearest point on path
         ind = min(range(len(path)), key=lambda i: np.hypot(path[i, 0].item() - state[0].item(), 
                                                              path[i, 1].item() - state[1].item()))
         ind = max(cind, ind)
+        
+        # Generate reference trajectory
         travel = lookahead_distance
         for i in range(horizon + 1):
             travel += reference_path_interval
             dind = int(round(travel / DL))
             if (ind + dind) < ncourse:
                 xref[i, :3] = path[ind + dind]
-                xref[i, 3] = self.env.V_MAX
+                xref[i, 3] = self.vehicle_model.V_MAX
             else:
                 xref[i, :3] = path[-1]
                 xref[i, 3] = 0.0
@@ -262,19 +259,21 @@ class racing_controller:
 ###############################################################################
 class RacingControllerROSNode:
     def __init__(self):
-        rospy.init_node('mppi_controller', anonymous=True)
+        rospy.init_node('mppi_racing_controller', anonymous=True)
         
         # Get device configuration
-        use_cuda = rospy.get_param('~use_cuda', True)
+        use_cuda = rospy.get_param('~use_cuda', torch.cuda.is_available())
         self._device = torch.device("cuda" if torch.cuda.is_available() and use_cuda else "cpu")
         rospy.loginfo(f"Using device: {self._device}")
         
         # Data placeholders for incoming messages
         self.global_path_np = None
+        self.global_path_tensor = None
         self.left_lane_width = None
         self.right_lane_width = None
         self.current_state = None
         self.obstacle_map = None
+        self.lane_map = None
         
         # Timestamp trackers for timeout detection
         self.last_state_time = None
@@ -294,17 +293,19 @@ class RacingControllerROSNode:
         rospy.Subscriber("/obstacle_info", Detection2DArray, self.obstacle_info_callback)
 
         # Publishers
-        self.cmd_pub = rospy.Publisher("control_cmd", Twist, queue_size=1)
+        self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
         self.predicted_path_pub = rospy.Publisher("predicted_path", Path, queue_size=1)
         self.visualization_pub = rospy.Publisher("mppi_visualization", MarkerArray, queue_size=1)
 
-        # Create dummy environment and controller instance
-        self.env = DummyEnv()
-        self.controller = racing_controller(self.env, 
-                                           debug=rospy.get_param('~debug', True),
-                                           device=self._device)
+        # Create vehicle model and controller instance
+        self.vehicle_model = VehicleModel()
+        self.controller = RacingController(
+            self.vehicle_model, 
+            debug=rospy.get_param('~debug', True),
+            device=self._device
+        )
 
-        # Control loop rate - dynamically adjustable based on computation time
+        # Control loop rate - dynamically adjustable based on computation 시간
         update_rate = rospy.get_param('~control_rate', 10.0)  # Hz
         self.timer = rospy.Timer(rospy.Duration(1.0/update_rate), self.control_loop)
         
@@ -315,7 +316,7 @@ class RacingControllerROSNode:
 
     def vehicle_state_callback(self, msg: Odometry):
         try:
-            self.current_state = odometry_to_state(msg)
+            self.current_state = odometry_to_state(msg).to(self._device)
             self.last_state_time = rospy.Time.now()
         except Exception as e:
             rospy.logerr(f"Error in vehicle_state_callback: {e}")
@@ -327,6 +328,7 @@ class RacingControllerROSNode:
                 return
                 
             self.global_path_np = path_msg_to_numpy(msg)
+            self.global_path_tensor = torch.tensor(self.global_path_np, dtype=torch.float32, device=self._device)
             self.last_path_time = rospy.Time.now()
             rospy.loginfo(f"Received global path with {len(msg.poses)} points")
             self.update_lane_map()
@@ -334,7 +336,6 @@ class RacingControllerROSNode:
             rospy.logerr(f"Error in global_path_callback: {e}")
 
     def left_lane_width_callback(self, msg: Float64MultiArray):
-        # msg.data is a list of floats
         self.left_lane_width = list(msg.data)
         self.update_lane_map()
 
@@ -343,67 +344,25 @@ class RacingControllerROSNode:
         self.update_lane_map()
 
     def update_lane_map(self):
-        """
-        Create or update the LaneMap if global path and both lane widths are available.
-        Uses point-specific lane widths when available.
-        """
+        """Create or update the LaneMap if global path and both lane widths are available."""
         if self.global_path_np is None or self.left_lane_width is None or self.right_lane_width is None:
             return
 
         try:
-            left_array = np.array(self.left_lane_width)
-            right_array = np.array(self.right_lane_width)
+            # Create lane map from center path and lane widths
+            avg_lane_width = float(np.mean(np.array(self.left_lane_width) + np.array(self.right_lane_width)))
             
-            # Validate array dimensions
-            if len(left_array) != len(right_array):
-                rospy.logwarn(f"Lane width arrays have different lengths: left={len(left_array)}, right={len(right_array)}")
-                # Use the shorter length
-                min_length = min(len(left_array), len(right_array))
-                left_array = left_array[:min_length]
-                right_array = right_array[:min_length]
-            
-            # Calculate point-specific widths
-            point_widths = (left_array + right_array) / 2.0
-            
-            # If widths don't match path length, handle appropriately
-            if len(point_widths) != len(self.global_path_np):
-                rospy.loginfo(f"Lane width count ({len(point_widths)}) doesn't match path points ({len(self.global_path_np)})")
-                # Option 1: Use average width for the entire path
-                avg_lane_width = float(np.mean(point_widths))
-                self.lane_map = LaneMap(
-                    self.global_path_np, 
-                    lane_width=avg_lane_width, 
-                    map_size=(20, 20), 
-                    cell_size=0.01,
-                    device=self._device, 
-                    dtype=torch.float32
-                )
-            else:
-                # Option 2: Use point-specific widths if supported by LaneMap
-                # Check if LaneMap supports variable widths
-                if hasattr(LaneMap, 'supports_variable_width') and LaneMap.supports_variable_width:
-                    self.lane_map = LaneMap(
-                        self.global_path_np, 
-                        lane_width=point_widths, 
-                        map_size=(20, 20), 
-                        cell_size=0.01,
-                        device=self._device, 
-                        dtype=torch.float32
-                    )
-                else:
-                    # Fall back to average width
-                    avg_lane_width = float(np.mean(point_widths))
-                    self.lane_map = LaneMap(
-                        self.global_path_np, 
-                        lane_width=avg_lane_width, 
-                        map_size=(20, 20), 
-                        cell_size=0.01,
-                        device=self._device, 
-                        dtype=torch.float32
-                    )
+            self.lane_map = LaneMap(
+                lane=self.global_path_np,
+                lane_width=avg_lane_width,
+                map_size=(80, 80),
+                cell_size=0.1,
+                device=self._device,
+                dtype=torch.float32
+            )
             
             # Update controller cost map if obstacle map is ready
-            if self.obstacle_map is not None:
+            if self.obstacle_map is not None and hasattr(self, "controller"):
                 self.controller.set_cost_map(self.obstacle_map, self.lane_map)
                 
             rospy.loginfo("Lane map updated successfully")
@@ -412,40 +371,25 @@ class RacingControllerROSNode:
             rospy.logerr(f"Error in update_lane_map: {e}")
 
     def obstacle_info_callback(self, msg: Detection2DArray):
-        """
-        Process a vision_msgs/Detection2DArray message.
-        Iterate over detections to extract bounding box info and create a new ObstacleMap.
-        """
+        """Process obstacle information and update the obstacle map"""
         try:
             self.obstacle_map = ObstacleMap(
-                map_size=(rospy.get_param('~map_size_x', 20), rospy.get_param('~map_size_y', 20)),
-                cell_size=rospy.get_param('~cell_size', 0.01),
+                map_size=(80, 80),
+                cell_size=0.1,
                 device=self._device,
                 dtype=torch.float32
             )
             
-            rospy.loginfo(f"Processing {len(msg.detections)} obstacles")
-            
-            # Iterate over all detections in the message
             for detection in msg.detections:
                 x = detection.bbox.center.x
                 y = detection.bbox.center.y
-                width = detection.bbox.size.x
-                height = detection.bbox.size.y
-                
-                # Add some validation to avoid invalid obstacles
-                if width <= 0 or height <= 0:
-                    rospy.logwarn(f"Skipping invalid obstacle dimensions: {width}x{height}")
-                    continue
-                    
-                # Add rectangle obstacle (ignoring rotation; extend if needed)
-                self.obstacle_map.add_rectangle_obstacle(np.array([x, y]), width, height)
-                
+                radius = detection.bbox.size_x / 2  # assuming circular obstacles
+                self.obstacle_map.add_circle_obstacle(np.array([x, y]), radius)
+            
             self.obstacle_map.convert_to_torch()
             self.last_obstacle_time = rospy.Time.now()
             
-            # Update controller cost map if lane map is ready
-            if self.lane_map is not None:
+            if self.lane_map is not None and hasattr(self, "controller"):
                 self.controller.set_cost_map(self.obstacle_map, self.lane_map)
                 
         except Exception as e:
@@ -456,13 +400,13 @@ class RacingControllerROSNode:
         now = rospy.Time.now()
         
         if self.last_state_time and (now - self.last_state_time) > self.state_timeout:
-            rospy.logwarn("Vehicle state data is stale!")
+            rospy.logwarn_throttle(1.0, "Vehicle state data is stale!")
             
         if self.last_path_time and (now - self.last_path_time) > self.path_timeout:
-            rospy.logwarn("Global path data is stale!")
+            rospy.logwarn_throttle(1.0, "Global path data is stale!")
             
         if self.last_obstacle_time and (now - self.last_obstacle_time) > self.obstacle_timeout:
-            rospy.logwarn("Obstacle data is stale!")
+            rospy.logwarn_throttle(1.0, "Obstacle data is stale!")
 
     def publish_predicted_path(self, state_seq):
         """Publish the predicted trajectory for visualization"""
@@ -479,14 +423,11 @@ class RacingControllerROSNode:
             pose_stamped.header = predicted_path.header
             pose_stamped.pose.position.x = state[0].item()
             pose_stamped.pose.position.y = state[1].item()
-            
-            # Convert yaw to quaternion
             q = tft.quaternion_from_euler(0, 0, state[2].item())
             pose_stamped.pose.orientation.x = q[0]
             pose_stamped.pose.orientation.y = q[1]
             pose_stamped.pose.orientation.z = q[2]
             pose_stamped.pose.orientation.w = q[3]
-            
             predicted_path.poses.append(pose_stamped)
             
         self.predicted_path_pub.publish(predicted_path)
@@ -495,7 +436,6 @@ class RacingControllerROSNode:
         """Publish visualization markers for debugging"""
         marker_array = MarkerArray()
         
-        # Visualize the optimal trajectory if available
         if state_seq is not None:
             line_marker = Marker()
             line_marker.header.frame_id = "map"
@@ -504,7 +444,7 @@ class RacingControllerROSNode:
             line_marker.id = 0
             line_marker.type = Marker.LINE_STRIP
             line_marker.action = Marker.ADD
-            line_marker.scale.x = 0.05  # Line width
+            line_marker.scale.x = 0.05
             line_marker.color.r = 0.0
             line_marker.color.g = 1.0
             line_marker.color.b = 0.0
@@ -514,14 +454,13 @@ class RacingControllerROSNode:
                 p = Point()
                 p.x = state_seq[i, 0].item()
                 p.y = state_seq[i, 1].item()
-                p.z = 0.1  # Slightly above ground for visibility
+                p.z = 0.1
                 line_marker.points.append(p)
                 
             marker_array.markers.append(line_marker)
             
-        # If we have sampled trajectories, visualize them too
         if top_samples is not None and isinstance(top_samples, torch.Tensor):
-            for i in range(min(5, top_samples.shape[0])):  # Visualize top 5 samples
+            for i in range(min(5, top_samples.shape[0])):
                 sample = top_samples[i]
                 sample_marker = Marker()
                 sample_marker.header.frame_id = "map"
@@ -530,17 +469,17 @@ class RacingControllerROSNode:
                 sample_marker.id = i + 1
                 sample_marker.type = Marker.LINE_STRIP
                 sample_marker.action = Marker.ADD
-                sample_marker.scale.x = 0.02  # Thinner line
+                sample_marker.scale.x = 0.02
                 sample_marker.color.r = 1.0
                 sample_marker.color.g = 0.0
                 sample_marker.color.b = 1.0
-                sample_marker.color.a = 0.5  # Semi-transparent
+                sample_marker.color.a = 0.5
                 
                 for j in range(sample.shape[0]):
                     p = Point()
                     p.x = sample[j, 0].item()
                     p.y = sample[j, 1].item()
-                    p.z = 0.05  # Slightly above ground
+                    p.z = 0.05
                     sample_marker.points.append(p)
                     
                 marker_array.markers.append(sample_marker)
@@ -550,12 +489,11 @@ class RacingControllerROSNode:
     def control_loop(self, event):
         start_time = time.time()
         
-        # Check if we have all necessary data
         if self.current_state is None:
             rospy.logwarn_throttle(1.0, "Waiting for vehicle state...")
             return
             
-        if self.global_path_np is None:
+        if self.global_path_tensor is None:
             rospy.logwarn_throttle(1.0, "Waiting for global path...")
             return
             
@@ -568,41 +506,36 @@ class RacingControllerROSNode:
             return
 
         try:
-            # Convert global path (numpy array) to a torch tensor for planning
-            global_path_tensor = torch.tensor(self.global_path_np, dtype=torch.float32, device=self._device)
-            
-            # Generate control sequence and predicted states
-            action_seq, state_seq = self.controller.update(self.current_state, global_path_tensor)
+            if self.current_state.device != self._device:
+                self.current_state = self.current_state.to(self._device)
+            if self.global_path_tensor.device != self._device:
+                self.global_path_tensor = self.global_path_tensor.to(self._device)
+                
+            action_seq, state_seq = self.controller.update(self.current_state, self.global_path_tensor)
             
             if action_seq is not None and state_seq is not None:
-                # Publish first control action
-                action = action_seq[0]
+                action = action_seq[0].detach().cpu()
                 cmd_msg = Twist()
-                cmd_msg.linear.x = action[0].item()
-                cmd_msg.angular.z = action[1].item()
+                cmd_msg.linear.x = action[0].item()  # acceleration
+                cmd_msg.angular.z = action[1].item()  # steering
                 self.cmd_pub.publish(cmd_msg)
                 
-                # Get top samples for visualization
-                top_samples, _ = self.controller.get_top_samples(5)
+                top_samples, top_weights = self.controller.get_top_samples(5)
                 
-                # Publish visualizations if debug is enabled
                 if self.controller.debug:
                     self.publish_predicted_path(state_seq[0])
                     self.publish_visualizations(state_seq[0], top_samples)
-                    
-                    # Log information about the control
                     rospy.loginfo("Control: accel={:.3f}, steer={:.3f}, v={:.2f}".format(
                         cmd_msg.linear.x, cmd_msg.angular.z, self.current_state[3].item()))
             else:
-                rospy.logwarn("Controller update returned None")
+                rospy.logwarn_throttle(1.0, "Controller update returned None")
                 
         except Exception as e:
             rospy.logerr(f"Control loop error: {e}")
             
-        # Check computation time and adjust if necessary
         compute_time = time.time() - start_time
-        if compute_time > 0.09:  # 90% of the expected time for 10Hz
-            rospy.logwarn(f"Control loop taking too long: {compute_time:.3f}s")
+        if compute_time > 0.09:
+            rospy.logwarn_throttle(1.0, f"Control loop taking too long: {compute_time:.3f}s")
 
 if __name__ == "__main__":
     try:
