@@ -199,35 +199,45 @@ class RacingController:
         self.obstacle_map = obstacle_map
         self.lane_map = lane_map
 
-    def cost_function(self, state: torch.Tensor, action: torch.Tensor, info: dict):
-        """Cost function for MPPI optimization"""
+    def cost_function(self, state: torch.Tensor, action: torch.Tensor, info: dict) -> torch.Tensor:
+        """
+        Calculate cost function
+        Args:
+            state (torch.Tensor): state batch tensor, shape (batch_size, 4) [x, y, theta, v]
+            action (torch.Tensor): control batch tensor, shape (batch_size, 2) [accel, steer]
+        Returns:
+            torch.Tensor: shape (batch_size,)
+        """
+        # info
         prev_action = info["prev_action"]
-        t = info["t"]
-        
-        # Cross-track and lateral errors
-        ec = torch.sin(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
-             torch.cos(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
-        el = -torch.cos(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) - \
-             torch.sin(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
+        t = info["t"] # horizon number
+
+        # path cost
+        # contouring and lag error of path
+        ec = torch.sin(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) \
+            -torch.cos(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
+        el = -torch.cos(self.reference_path[t, 2]) * (state[:, 0] - self.reference_path[t, 0]) \
+             -torch.sin(self.reference_path[t, 2]) * (state[:, 1] - self.reference_path[t, 1])
+
         path_cost = self.Qc * ec.pow(2) + self.Ql * el.pow(2)
-        
-        # Velocity error
+
+        # velocity cost
         v = state[:, 3]
-        v_target = self.reference_path[t, 3] if self.reference_path.shape[1] > 3 else self.vehicle_model.V_MAX
+        v_target = self.reference_path[t, 3]
         velocity_cost = self.Qv * (v - v_target).pow(2)
-        
-        # Obstacle and lane boundary costs
-        pos_batch = state[:, :2].unsqueeze(1)
-        obstacle_cost = self.obstacle_map.compute_cost(pos_batch).squeeze(1)
+
+        # compute obstacle cost from cost map
+        pos_batch = state[:, :2].unsqueeze(1)  # (batch_size, 1, 2)
+        obstacle_cost = self.obstacle_map.compute_cost(pos_batch).squeeze(1)  # (batch_size,)
         obstacle_cost += self.lane_map.compute_cost(pos_batch).squeeze(1)
         obstacle_cost = self.Qo * obstacle_cost
-        
-        # Input regularization costs
+
+        # input cost
         input_cost = self.Qin * action.pow(2).sum(dim=1)
         input_cost += self.Qdin * (action - prev_action).pow(2).sum(dim=1)
-        
-        # Total cost
+
         cost = path_cost + velocity_cost + obstacle_cost + input_cost
+
         return cost
 
     def calc_ref_trajectory(self, state: torch.Tensor, path: torch.Tensor, cind: int, horizon: int,
@@ -547,6 +557,8 @@ class RacingControllerROSNode:
             rospy.logerr(f"Control loop error: {e}")
             
         compute_time = time.time() - start_time
+        rospy.loginfo(f"Control loop compute time[ms]: {compute_time * 1000:.3f} [ms]")
+        
         if compute_time > 0.09:
             rospy.logwarn_throttle(1.0, f"Control loop taking too long: {compute_time:.3f}s")
 
