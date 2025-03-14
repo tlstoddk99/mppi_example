@@ -61,7 +61,7 @@ class VehicleModel:
     """
     def __init__(self):
         # Load parameters from ROS parameter server with defaults
-        self.V_MAX = rospy.get_param('~v_max', 8.0)
+        self.V_MAX = rospy.get_param('~v_max', 2.0)
         u_min_accel = rospy.get_param('~u_min_accel', -2.0)
         u_min_steer = rospy.get_param('~u_min_steer', -0.25)
         u_max_accel = rospy.get_param('~u_max_accel', 2.0)
@@ -140,7 +140,7 @@ class RacingController:
         self.Qc = rospy.get_param('~cost/Qc', 2.0)
         self.Ql = rospy.get_param('~cost/Ql', 3.0)
         self.Qv = rospy.get_param('~cost/Qv', 2.0)
-        self.Qo = rospy.get_param('~cost/Qo', 10000.0)
+        self.Qo = rospy.get_param('~cost/Qo', 0.0)
         self.Qin = rospy.get_param('~cost/Qin', 0.01)
         self.Qdin = rospy.get_param('~cost/Qdin', 0.5)
 
@@ -235,10 +235,12 @@ class RacingController:
         """Calculate reference trajectory from global path"""
         ncourse = len(path)
         xref = torch.zeros((horizon + 1, state.shape[0]), dtype=state.dtype, device=state.device)
+        path_cpu = path.cpu().numpy()
+        state_cpu = state.cpu().numpy()
         
         # Find nearest point on path
-        ind = min(range(len(path)), key=lambda i: np.hypot(path[i, 0].item() - state[0].item(), 
-                                                             path[i, 1].item() - state[1].item()))
+        ind = min(range(len(path)), key=lambda i: np.hypot(path_cpu[i, 0] - state_cpu[0], 
+                                                             path_cpu[i, 1] - state_cpu[1]))
         ind = max(cind, ind)
         
         # Generate reference trajectory
@@ -506,25 +508,36 @@ class RacingControllerROSNode:
             return
 
         try:
+            
             if self.current_state.device != self._device:
                 self.current_state = self.current_state.to(self._device)
             if self.global_path_tensor.device != self._device:
                 self.global_path_tensor = self.global_path_tensor.to(self._device)
-                
+            
+
             action_seq, state_seq = self.controller.update(self.current_state, self.global_path_tensor)
+            
+            compute_time = time.time() - start_time
+            rospy.loginfo(f"Control loop compute time2: {compute_time:.3f}s")
+            
             
             if action_seq is not None and state_seq is not None:
                 action = action_seq[0].detach().cpu()
+                
                 cmd_msg = Twist()
                 cmd_msg.linear.x = action[0].item()  # acceleration
                 cmd_msg.angular.z = action[1].item()  # steering
                 self.cmd_pub.publish(cmd_msg)
                 
+    
                 top_samples, top_weights = self.controller.get_top_samples(5)
                 
                 if self.controller.debug:
                     self.publish_predicted_path(state_seq[0])
                     self.publish_visualizations(state_seq[0], top_samples)
+                    
+                
+                    
                     rospy.loginfo("Control: accel={:.3f}, steer={:.3f}, v={:.2f}".format(
                         cmd_msg.linear.x, cmd_msg.angular.z, self.current_state[3].item()))
             else:

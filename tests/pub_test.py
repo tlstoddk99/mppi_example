@@ -44,9 +44,8 @@ class MPPITestPublisher:
         self.vehicle_state_pub = rospy.Publisher('/vehicle_state', Odometry, queue_size=1)
         self.obstacle_info_pub = rospy.Publisher('/obstacle_info', Detection2DArray, queue_size=1)
         
-        if args.manual_control:
-            rospy.Subscriber('/cmd_vel', Twist, self.cmd_vel_callback)
-            rospy.loginfo("Manual control enabled - listening on /cmd_vel")
+        rospy.Subscriber('/cmd_vel', Twist, self.cmd_vel_callback)
+        rospy.loginfo("Manual control enabled - listening on /cmd_vel")
         
         self.reset_service = rospy.Service('~reset_vehicle', Empty, self.handle_reset_service)
         
