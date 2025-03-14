@@ -113,36 +113,30 @@ class RacingController:
         self.debug = debug
         self.current_path_index = 0
 
-        # Load MPPI parameters from ROS parameter server
-        horizon = rospy.get_param('~mppi/horizon', 25)
-        num_samples = rospy.get_param('~mppi/num_samples', 4000)
-        sigma_accel = rospy.get_param('~mppi/sigma_accel', 0.5)
-        sigma_steer = rospy.get_param('~mppi/sigma_steer', 0.1)
-        lambda_value = rospy.get_param('~mppi/lambda', 1.0)
-        
+        # MPPI solver
         self.solver = MPPI(
-            horizon=horizon,
-            num_samples=num_samples,
+            horizon=25,
+            num_samples=4000,
             dim_state=4,
             dim_control=2,
             dynamics=vehicle_model.dynamics,
             cost_func=self.cost_function,
             u_min=vehicle_model.u_min,
             u_max=vehicle_model.u_max,
-            sigmas=torch.tensor([sigma_accel, sigma_steer]),
-            lambda_=lambda_value,
-            auto_lambda=rospy.get_param('~mppi/auto_lambda', False),
+            sigmas=torch.tensor([0.5, 0.1]),
+            lambda_=1.0,
+            auto_lambda=False,
         )
 
         self.vehicle_model = vehicle_model
 
-        # Cost weights from ROS parameters
-        self.Qc = rospy.get_param('~cost/Qc', 2.0)
-        self.Ql = rospy.get_param('~cost/Ql', 3.0)
-        self.Qv = rospy.get_param('~cost/Qv', 2.0)
-        self.Qo = rospy.get_param('~cost/Qo', 0.0)
-        self.Qin = rospy.get_param('~cost/Qin', 0.01)
-        self.Qdin = rospy.get_param('~cost/Qdin', 0.5)
+        
+        self.Qc = 2.0  # contouring error cost
+        self.Ql = 3.0  # lag error cost
+        self.Qv = 2.0  # velocity cost
+        self.Qo = 10000.0  # obstacle cost
+        self.Qin = 0.01  # input cost
+        self.Qdin = 0.5  # differential input cost
 
         self._device = device
         self._dtype = dtype
@@ -157,12 +151,9 @@ class RacingController:
         Update controller with current state and generate optimal control sequence.
         """
         try:
-            # Calculate reference trajectory along the global path
             self.reference_path, self.current_path_index = self.calc_ref_trajectory(
-                state, racing_center_path, self.current_path_index,
-                self.solver._horizon, DL=0.1, 
-                lookahead_distance=rospy.get_param('~lookahead_distance', 3.0), 
-                reference_path_interval=rospy.get_param('~reference_path_interval', 0.85)
+            state, racing_center_path, self.current_path_index, 
+            self.solver._horizon, DL=0.1, lookahead_distance=3, reference_path_interval=0.85
             )
 
             if self.reference_path is not None:
