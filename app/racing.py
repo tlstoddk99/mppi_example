@@ -67,6 +67,7 @@ class racing_controller:
             Tuple[torch.Tensor, torch.Tensor]: action sequence tensor, shape (horizon, 2) [accel, steer], state sequence tensor, shape (horizon + 1, 4) [x, y, yaw, v]
         """
 
+        loop_start_time = time.time()
         # reference
         self.reference_path, self.current_path_index = self.calc_ref_trajectory(
             state, racing_center_path, self.current_path_index, self.solver._horizon, DL=0.1, lookahead_distance=3, reference_path_interval=0.85
@@ -83,6 +84,9 @@ class racing_controller:
 
         if self.debug:
             print("solve time: {}".format(round(solve_time * 1000, 2)), " [ms]")
+            
+        print("loop time: {}".format(round((time.time() - loop_start_time) * 1000, 2)), " [ms]")
+        print("")
 
         return action_seq, state_seq
     
@@ -156,10 +160,18 @@ class racing_controller:
         ncourse = len(path)
         xref = torch.zeros((horizon + 1, state.shape[0]), dtype=state.dtype, device=state.device)
 
-        # Calculate the nearest index to the vehicle
-        ind = min(range(len(path)), key=lambda i: np.hypot(path[i, 0].cpu().numpy() - state[0].cpu().numpy(), path[i, 1].cpu().numpy() - state[1].cpu().numpy()))
-        # Ensure the index is not less than the current index
+        path_cpu = path.cpu().numpy()
+        state_cpu = state.cpu().numpy()
+        
+        # Find nearest point on path
+        ind = min(range(len(path)), key=lambda i: np.hypot(path_cpu[i, 0] - state_cpu[0], 
+                                                             path_cpu[i, 1] - state_cpu[1]))
         ind = max(cind, ind)
+        
+        # # Calculate the nearest index to the vehicle
+        # ind = min(range(len(path)), key=lambda i: np.hypot(path[i, 0].cpu().numpy() - state[0].cpu().numpy(), path[i, 1].cpu().numpy() - state[1].cpu().numpy()))
+        # # Ensure the index is not less than the current index
+        # ind = max(cind, ind)
 
         # Generate the rest of the reference trajectory
         travel = lookahead_distance
@@ -225,7 +237,7 @@ def main(save_mode: bool = False):
             print("Goal Reached!")
             break
 
-    print("average solve time: {}".format(average_time * 1000), " [ms]")
+    # print("average solve time: {}".format(average_time * 1000), " [ms]")
     env.close()  # close window and save video if save_mode is True
 
 
