@@ -294,11 +294,11 @@ class MPPITestPublisher:
 def parse_arguments():
     parser = argparse.ArgumentParser(description='MPPI Test Publisher')
     parser.add_argument('--manual_control', action='store_true', help='Enable manual control via /cmd_vel')
-    parser.add_argument('--num_obstacles', type=int, default=5, help='Number of obstacles to generate')
+    parser.add_argument('--num_obstacles', type=int, default=0, help='Number of obstacles to generate')
     parser.add_argument('--update_rate', type=float, default=10.0, help='Vehicle state update rate in Hz')
     parser.add_argument('--obstacle_update_rate', type=float, default=10.0, help='Obstacle update rate in Hz')
-    parser.add_argument('--obstacle_movement_prob', type=float, default=0.2, help='Probability of obstacle movement per update')
-    parser.add_argument('--obstacle_max_movement', type=float, default=0.5, help='Maximum obstacle movement distance per update')
+    parser.add_argument('--obstacle_movement_prob', type=float, default=0.0, help='Probability of obstacle movement per update')
+    parser.add_argument('--obstacle_max_movement', type=float, default=0.0, help='Maximum obstacle movement distance per update')
     return parser.parse_args()
         
 if __name__ == "__main__":
