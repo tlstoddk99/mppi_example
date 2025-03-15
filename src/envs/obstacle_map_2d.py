@@ -60,10 +60,7 @@ class ObstacleMap:
         cell_size: (m)
         """
         # device and dtype
-        if torch.cuda.is_available() and device == torch.device("cuda"):
-            self._device = torch.device("cuda")
-        else:
-            self._device = torch.device("cpu")
+        self._device = device
         self._dtype = dtype
 
         assert len(map_size) == 2

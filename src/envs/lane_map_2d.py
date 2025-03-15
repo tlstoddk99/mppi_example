@@ -35,10 +35,7 @@ class LaneMap:
         assert len(lane.shape) == 2 and lane.shape[1] == 3
 
         # device and dtype
-        if torch.cuda.is_available() and device == torch.device("cuda"):
-            self._device = torch.device("cuda")
-        else:
-            self._device = torch.device("cpu")
+        self._device = device
         self._dtype = dtype
 
         # Initialize map and related attributes

@@ -11,12 +11,15 @@ from envs.navigation_2d import Navigation2DEnv
 
 
 def main(save_mode: bool = False):
-    env = Navigation2DEnv()
+    device = torch.device("cuda")
+    # device = torch.device("cpu")
+    
+    env = Navigation2DEnv(device=device)
 
     # solver
     solver = MPPI(
-        horizon=30,
-        num_samples=3000,
+        horizon=10,
+        num_samples=30000,
         dim_state=3,
         dim_control=2,
         dynamics=env.dynamics,
@@ -26,6 +29,7 @@ def main(save_mode: bool = False):
         sigmas=torch.tensor([0.5, 0.5]),
         lambda_=1.0,
         auto_lambda=False,
+        device=device,
     )
 
     state = env.reset()
@@ -35,8 +39,8 @@ def main(save_mode: bool = False):
     for i in range(max_steps):
         start = time.time()
         action_seq, state_seq = solver.forward(state=state)
-        end = time.time()
-        total_time += end - start
+        # end = time.time()
+        # total_time += end - start
         step_count += 1
 
         state, is_goal_reached = env.step(action_seq[0, :])
@@ -67,9 +71,14 @@ def main(save_mode: bool = False):
         if is_goal_reached:
             print("Goal Reached!")
             break
+        
+        end=time.time()
+        print("{:.3f} Hz".format(1/(end-start)))
+        total_time += end - start
 
     average_time = total_time / step_count
-    print("average solve time: {:.3f} ms".format(average_time * 1000))
+    # print("average solve time: {:.3f} ms".format(average_time * 1000))
+    print("average Hz: {:.3f} Hz".format(1/average_time))
     env.close()  # close window and save video if save_mode is True
 
 

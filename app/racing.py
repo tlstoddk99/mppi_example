@@ -21,18 +21,20 @@ class racing_controller:
 
         # solver
         self.solver = MPPI(
-            horizon=25,
-            num_samples=4000000,
+            horizon=20,
+            num_samples=3000000,
             dim_state=4,
             dim_control=2,
             dynamics=env.dynamics,
             cost_func=self.cost_function,
             u_min=env.u_min,
             u_max=env.u_max,
-            sigmas=torch.tensor([0.5, 0.1]),
+            sigmas=torch.tensor([100, 100]),
             lambda_=1.0,
-            auto_lambda=False,
+            auto_lambda=True,
             device=device,
+            # exploration=0.2,
+            # use_sg_filter=True,
         )
 
         # config
@@ -41,7 +43,7 @@ class racing_controller:
         # cost weights
         self.Qc = 2.0  # contouring error cost
         self.Ql = 3.0  # lag error cost
-        self.Qv = 2.0  # velocity cost
+        self.Qv = 0.0  # velocity cost
         self.Qo = 10000.0  # obstacle cost
         self.Qin = 0.01  # input cost
         self.Qdin = 0.5  # differential input cost
@@ -52,7 +54,7 @@ class racing_controller:
         # else:
         #     self._device = torch.device("cpu")
         
-        self._device = torch.device("cpu")
+        self._device = device
         
         self._dtype = dtype
 
@@ -74,7 +76,7 @@ class racing_controller:
         loop_start_time = time.time()
         # reference
         self.reference_path, self.current_path_index = self.calc_ref_trajectory(
-            state, racing_center_path, self.current_path_index, self.solver._horizon, DL=0.1, lookahead_distance=3, reference_path_interval=0.85
+            state, racing_center_path, self.current_path_index, self.solver._horizon, DL=0.1, lookahead_distance=3, reference_path_interval=0.8
         )
 
         if self.reference_path is None and self.obstacle_map is None and self.lane_map is None:
@@ -89,8 +91,12 @@ class racing_controller:
         if self.debug:
             print("solve time: {}".format(round(solve_time * 1000, 2)), " [ms]")
             
-        print("loop time: {}".format(round((time.time() - loop_start_time) * 1000, 2)), " [ms]")
-        print("")
+        
+        
+        if time.time() - loop_start_time > 0.1:
+            print("######################")
+            print("loop time: {}".format(round((time.time() - loop_start_time) * 1000, 2)), " [ms]")
+            print("######################")
 
         return action_seq, state_seq
     
@@ -126,7 +132,8 @@ class racing_controller:
         # velocity cost
         v = state[:, 3]
         v_target = self.reference_path[t, 3]
-        velocity_cost = self.Qv * (v - v_target).pow(2)
+        # velocity_cost = self.Qv * (v - v_target).pow(2)
+        velocity_cost = 0
 
         # compute obstacle cost from cost map
         pos_batch = state[:, :2].unsqueeze(1)  # (batch_size, 1, 2)
@@ -196,8 +203,8 @@ class racing_controller:
 
 
 def main(save_mode: bool = False):
-    device= torch.device("cpu")
-    # device = torch.device("cuda") 
+    # device= torch.device("cpu")
+    device = torch.device("cuda") 
     env = RacingEnv(device=device)
 
     # controller
@@ -214,7 +221,7 @@ def main(save_mode: bool = False):
 
         is_collisions = env.collision_check(state=state_seq)
 
-        top_samples, top_weights = controller.get_top_samples(num_samples=300)
+        top_samples, top_weights = controller.get_top_samples(num_samples=500)
 
         if save_mode:
             env.render(

@@ -27,26 +27,24 @@ def angle_normalize(x):
 
 class RacingEnv:
     def __init__(
-        self, device=torch.device("cuda"), dtype=torch.float32, seed: int = 42
+        self, device=torch.device("cuda"), dtype=torch.float32, seed: int = 4
     ) -> None:
         # device and dtype
-        if torch.cuda.is_available() and device == torch.device("cuda"):
-            self._device = torch.device("cuda")
-        else:
-            self._device = torch.device("cpu")
+        self._device = device
         self._dtype = dtype
 
         # u: [accel, steer] (m/s2, rad)
-        self.u_min = torch.tensor([-2.0, -0.25], device=self._device, dtype=self._dtype)
-        self.u_max = torch.tensor([2.0, 0.25], device=self._device, dtype=self._dtype)
+        self.u_min = torch.tensor([-1.3, -0.3], device=self._device, dtype=self._dtype)
+        self.u_max = torch.tensor([3.0, 0.3], device=self._device, dtype=self._dtype)
         
         # model parameters
-        self.L = torch.tensor(1, device=self._device, dtype=self._dtype)
-        self.V_MAX = torch.tensor(8.0, device=self._device, dtype=self._dtype)
+        self.L = torch.tensor(3, device=self._device, dtype=self._dtype)
+        # self.V_MAX = torch.tensor(8.0, device=self._device, dtype=self._dtype)
+        self.V_MAX = torch.tensor(11.0, device=self._device, dtype=self._dtype)
 
         # generate reference path
         self.dl = 0.1
-        self.line_width = 6.5
+        self.line_width = 5.7
         racing_center_path, _, _ = make_csv_paths("src/envs/circuit_generator/circuit.csv")
         self.right_lane, self.left_lane = make_side_lane(racing_center_path, lane_width=self.line_width)
         # numpy array to tensor
@@ -76,11 +74,11 @@ class RacingEnv:
             obstacle_map=self._obstacle_map,
             random_x_range=(-35, 35),
             random_y_range=(-35, 35),
-            num_circle_obs=10,
-            radius_range=(0.9, 1.2),
-            num_rectangle_obs=40,
-            width_range=(2.5, 4.0),
-            height_range=(2.5, 4.0),
+            num_circle_obs=40,
+            radius_range=(0.2, 0.9),
+            num_rectangle_obs=8,
+            width_range=(2.5, 6.0),
+            height_range=(2.5, 6.0),
             max_iteration=1000,
             seed=seed,
         )
