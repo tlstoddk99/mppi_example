@@ -71,10 +71,7 @@ class MPPI(nn.Module):
         # assert num_samples % batch_size == 0 and num_samples >= batch_size
 
         # device and dtype
-        if torch.cuda.is_available() and device == torch.device("cuda"):
-            self._device = torch.device("cuda")
-        else:
-            self._device = torch.device("cpu")
+        self._device = device
         print(f"Device: {self._device}")
         self._dtype = dtype
 

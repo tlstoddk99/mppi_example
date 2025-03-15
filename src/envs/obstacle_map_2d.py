@@ -30,17 +30,18 @@ class CircleObstacle:
 class RectangleObstacle:
     """
     Rectangle obstacle used in the obstacle map.
-    Not consider angle for now.
+    Now supporting rotation.
     """
-
     center: np.ndarray
     width: float
     height: float
+    angle: float  # angle in radians (counterclockwise)
 
-    def __init__(self, center: np.ndarray, width: float, height: float) -> None:
+    def __init__(self, center: np.ndarray, width: float, height: float, angle: float = 0.0) -> None:
         self.center = center
         self.width = width
         self.height = height
+        self.angle = angle
 
 
 class ObstacleMap:
@@ -122,40 +123,70 @@ class ObstacleMap:
         self.circle_obs_list.append(CircleObstacle(center, radius))
 
     def add_rectangle_obstacle(
-        self, center: np.ndarray, width: float, height: float
+        self, center: np.ndarray, width: float, height: float, angle: float = 0.0
     ) -> None:
         """
         Add a rectangle obstacle to the map.
         :param center: Center of the rectangle obstacle.
         :param width: Width of the rectangle obstacle.
         :param height: Height of the rectangle obstacle.
+        :param angle: Rotation angle in radians (counterclockwise from x-axis).
         """
         assert len(center) == 2
         assert width > 0
         assert height > 0
-
-        # convert to cell map
+        
+        # Convert to cell map coordinates
         center_occ = (center / self._cell_size) + self._cell_map_origin
-        center_occ = np.ceil(center_occ).astype(int)
         width_occ = ceil(width / self._cell_size)
         height_occ = ceil(height / self._cell_size)
+        
+        # Create rotation matrix
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        
+        # Create a bounding box for the rotated rectangle
+        # Calculate corner points
+        half_w, half_h = width_occ/2, height_occ/2
+        corners = np.array([
+            [-half_w, -half_h],
+            [half_w, -half_h],
+            [half_w, half_h],
+            [-half_w, half_h]
+        ])
+        
+        # Rotate corners
+        rotated_corners = np.dot(corners, rot_matrix.T)
+        
+        # Find min/max bounds
+        min_x = np.floor(np.min(rotated_corners[:, 0]))
+        max_x = np.ceil(np.max(rotated_corners[:, 0]))
+        min_y = np.floor(np.min(rotated_corners[:, 1]))
+        max_y = np.ceil(np.max(rotated_corners[:, 1]))
+        
+        # For each cell in the bounding box, check if it's inside the rotated rectangle
+        for x_offset in range(int(min_x), int(max_x + 1)):
+            for y_offset in range(int(min_y), int(max_y + 1)):
+                # Position relative to center
+                rel_pos = np.array([x_offset, y_offset])
+                
+                # Rotate back to check if in original rectangle
+                orig_pos = np.dot(rel_pos, rot_matrix)
+                
+                # Check if inside rectangle
+                if (abs(orig_pos[0]) <= half_w and abs(orig_pos[1]) <= half_h):
+                    # Calculate actual cell coordinates
+                    cell_x = int(center_occ[0] + x_offset)
+                    cell_y = int(center_occ[1] + y_offset)
+                    
+                    # Check bounds
+                    if (0 <= cell_x < self._map.shape[0] and 
+                        0 <= cell_y < self._map.shape[1]):
+                        self._map[cell_x, cell_y] = 1
 
-        # add to occ map
-        x_init = center_occ[0] - ceil(width_occ / 2)
-        x_end = center_occ[0] + ceil(width_occ / 2)
-        y_init = center_occ[1] - ceil(height_occ / 2)
-        y_end = center_occ[1] + ceil(height_occ / 2)
-
-        # # deal with out of bound
-        x_init = np.clip(x_init, 0, self._map.shape[0] - 1)
-        x_end = np.clip(x_end, 0, self._map.shape[0] - 1)
-        y_init = np.clip(y_init, 0, self._map.shape[1] - 1)
-        y_end = np.clip(y_end, 0, self._map.shape[1] - 1)
-
-        self._map[x_init:x_end, y_init:y_end] = 1
-
-        # add to rectangle obstacle list to use visualize
-        self.rectangle_obs_list.append(RectangleObstacle(center, width, height))
+        # Add to rectangle obstacle list for visualization
+        self.rectangle_obs_list.append(RectangleObstacle(center, width, height, angle))
 
     def convert_to_torch(self) -> torch.Tensor:
         self._map_torch = torch.from_numpy(self._map).to(self._device, self._dtype)
@@ -216,16 +247,28 @@ class ObstacleMap:
 
         # render rectangle obstacles
         for rectangle_obs in self.rectangle_obs_list:
-            ax.add_patch(
-                plt.Rectangle(
-                    rectangle_obs.center
-                    - np.array([rectangle_obs.width / 2, rectangle_obs.height / 2]),
-                    rectangle_obs.width,
-                    rectangle_obs.height,
-                    color="gray",
-                    zorder=zorder,
-                )
+            # Convert angle to degrees for matplotlib
+            angle_degrees = np.degrees(rectangle_obs.angle)
+            
+            # Create rectangle patch with rotation
+            rect = plt.Rectangle(
+                # For rotated rectangles, matplotlib rotates around the bottom-left corner
+                # so we need to adjust the position
+                (rectangle_obs.center[0] - rectangle_obs.width/2, 
+                 rectangle_obs.center[1] - rectangle_obs.height/2),
+                rectangle_obs.width,
+                rectangle_obs.height,
+                angle=angle_degrees,
+                color="gray",
+                zorder=zorder,
             )
+            
+            # Apply transform to rotate around center instead of corner
+            t = plt.matplotlib.transforms.Affine2D().rotate_deg_around(
+                rectangle_obs.center[0], rectangle_obs.center[1], angle_degrees)
+            rect.set_transform(t + ax.transData)
+            
+            ax.add_patch(rect)
 
 
 def generate_random_obstacles(
@@ -237,6 +280,7 @@ def generate_random_obstacles(
     num_rectangle_obs: int,
     width_range: Tuple[float, float],
     height_range: Tuple[float, float],
+    angle_range: Tuple[float, float],
     max_iteration: int,
     seed: int,
 ) -> None:
@@ -303,39 +347,44 @@ def generate_random_obstacles(
             center = np.array([center_x, center_y])
             width = rng.uniform(width_range[0], width_range[1])
             height = rng.uniform(height_range[0], height_range[1])
-
+            angle = rng.uniform(angle_range[0], angle_range[1])
+            
+            # Compute the bounding radius of the rotated rectangle
+            bounding_radius = np.sqrt((width/2)**2 + (height/2)**2)
+            
             # overlap check
             is_overlap = False
+            
+            # Check overlap with circle obstacles
             for circle_obs in obstacle_map.circle_obs_list:
-                if (
-                    np.linalg.norm(circle_obs.center - center)
-                    <= circle_obs.radius + width / 2
-                ):
-                    if (
-                        np.linalg.norm(circle_obs.center - center)
-                        <= circle_obs.radius + height / 2
-                    ):
-                        is_overlap = True
+                if (np.linalg.norm(circle_obs.center - center) <= circle_obs.radius + bounding_radius):
+                    is_overlap = True
+                    break
+                    
+            if is_overlap:
+                num_trial += 1
+                continue
 
+            # Check overlap with rectangle obstacles
             for rectangle_obs in obstacle_map.rectangle_obs_list:
-                if (
-                    np.linalg.norm(rectangle_obs.center - center)
-                    <= rectangle_obs.width / 2 + width / 2
-                ):
-                    if (
-                        np.linalg.norm(rectangle_obs.center - center)
-                        <= rectangle_obs.height / 2 + height / 2
-                    ):
-                        is_overlap = True
-
+                # Calculate bounding radius of existing rectangle
+                existing_bounding_radius = np.sqrt((rectangle_obs.width/2)**2 + (rectangle_obs.height/2)**2)
+                
+                # Check if bounding circles overlap
+                if (np.linalg.norm(rectangle_obs.center - center) <= existing_bounding_radius + bounding_radius):
+                    # For rectangles that might overlap, perform more detailed check
+                    # This is a conservative check that could be improved with more complex polygon intersection
+                    # For now, we'll consider it an overlap if bounding circles overlap
+                    is_overlap = True
+                    break
+                    
             if not is_overlap:
                 break
 
             num_trial += 1
-
             if num_trial == max_iteration:
                 raise RuntimeError(
                     "Cannot generate random obstacles due to reach max iteration."
                 )
 
-        obstacle_map.add_rectangle_obstacle(center, width, height)
+        obstacle_map.add_rectangle_obstacle(center, width, height, angle)

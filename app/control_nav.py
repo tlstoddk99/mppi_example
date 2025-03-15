@@ -1,25 +1,21 @@
-"""
-Kohei Honda, 2023.
-"""
-
-from __future__ import annotations
-
-from typing import Tuple, Union
-from matplotlib import pyplot as plt
-
 import torch
-import numpy as np
-import os
 
+import time
 
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+# import gymnasium
+import fire
+import tqdm
 
-from envs.obstacle_map_2d import ObstacleMap, generate_random_obstacles
+from controller.mppi import MPPI
 
+# from envs.navigation_2d import Navigation2DEnv
 
-@torch.jit.script
-def angle_normalize(x):
-    return ((x + torch.pi) % (2 * torch.pi)) - torch.pi
+import rospy
+from nav_msgs.msg import Path, Odometry
+from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import Twist, PoseStamped, Point
+from vision_msgs.msg import Detection2DArray
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 class Navigation2DEnv:
@@ -39,11 +35,11 @@ class Navigation2DEnv:
             obstacle_map=self._obstacle_map,
             random_x_range=(-7.5, 7.5),
             random_y_range=(-7.5, 7.5),
-            num_circle_obs=7,
-            radius_range=(1, 1),
-            num_rectangle_obs=7,
-            width_range=(2, 2),
-            height_range=(2, 2),
+            num_circle_obs=10,
+            radius_range=(0.5, 0.5),
+            num_rectangle_obs=5,
+            width_range=(3, 5),
+            height_range=(3, 5),
             max_iteration=1000,
             seed=seed,
         )
@@ -287,3 +283,74 @@ class Navigation2DEnv:
         pos_batch = state[:, :, :2]
         is_collisions = self._obstacle_map.compute_cost(pos_batch).squeeze(1)
         return is_collisions
+
+class MppiControllerNode:
+    def __init__(self):
+        rospy.init_node('mppi_controller_node')
+    
+
+
+def main(save_mode: bool = False):
+    device = torch.device("cuda")
+    # device = torch.device("cpu")
+    
+    env = Navigation2DEnv(device=device)
+
+    # solver
+    solver = MPPI(
+        horizon=30,
+        num_samples=300000,
+        dim_state=3,
+        dim_control=2,
+        dynamics=env.dynamics,
+        cost_func=env.cost_function,
+        u_min=env.u_min,
+        u_max=env.u_max,
+        sigmas=torch.tensor([0.5, 0.5]),
+        lambda_=1.0,
+        auto_lambda=False,
+        device=device,
+    )
+
+    state = env.reset()
+    max_steps = 500
+    total_time = 0.0
+    step_count = 0
+    for i in range(max_steps):
+        start = time.time()
+        action_seq, state_seq = solver.forward(state=state)
+        # end = time.time()
+        # total_time += end - start
+        step_count += 1
+
+        state, is_goal_reached = env.step(action_seq[0, :])
+
+        is_collisions = env.collision_check(state=state_seq)
+
+        top_samples, top_weights = solver.get_top_samples(num_samples=300)
+        
+        end=time.time()
+        print("{:.3f} Hz".format(1/(end-start)))
+
+    
+        env.render(
+            predicted_trajectory=state_seq,
+            is_collisions=is_collisions,
+            top_samples=(top_samples, top_weights),
+            mode="human",
+        )
+        
+        if is_goal_reached:
+            print("Goal Reached!")
+            break
+        
+        total_time += end - start
+
+    average_time = total_time / step_count
+    
+    print("average Hz: {:.3f} Hz".format(1/average_time))
+    
+
+
+if __name__ == "__main__":
+    fire.Fire(main)

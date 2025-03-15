@@ -18,8 +18,8 @@ def main(save_mode: bool = False):
 
     # solver
     solver = MPPI(
-        horizon=10,
-        num_samples=30000,
+        horizon=30,
+        num_samples=200000,
         dim_state=3,
         dim_control=2,
         dynamics=env.dynamics,
@@ -48,6 +48,11 @@ def main(save_mode: bool = False):
         is_collisions = env.collision_check(state=state_seq)
 
         top_samples, top_weights = solver.get_top_samples(num_samples=300)
+        
+        end=time.time()
+        
+        render_start = time.time()
+        # print("{:.3f} Hz".format(1/(end-start)))
 
         if save_mode:
             env.render(
@@ -60,7 +65,6 @@ def main(save_mode: bool = False):
             if i == 0:
                 pbar = tqdm.tqdm(total=max_steps, desc="recording video")
             pbar.update(1)
-
         else:
             env.render(
                 predicted_trajectory=state_seq,
@@ -71,9 +75,8 @@ def main(save_mode: bool = False):
         if is_goal_reached:
             print("Goal Reached!")
             break
-        
-        end=time.time()
-        print("{:.3f} Hz".format(1/(end-start)))
+        render_end = time.time()
+        print("solve Time: {:.3f}s, render Time: {:.3f}".format((end-start), (render_end-render_start)))
         total_time += end - start
 
     average_time = total_time / step_count
