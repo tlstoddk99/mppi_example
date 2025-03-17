@@ -79,6 +79,7 @@ class RacingEnv:
             num_rectangle_obs=8,
             width_range=(2.5, 6.0),
             height_range=(2.5, 6.0),
+            angle_range=(-np.pi / 4, np.pi / 4),
             max_iteration=1000,
             seed=seed,
         )

@@ -14,24 +14,12 @@ import numpy as np
 import os
 
 import rospy
+import tf
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Float64MultiArray
-from geometry_msgs.msg import Twist, PoseStamped, Point
-from vision_msgs.msg import Detection2DArray, Detection2D
+from geometry_msgs.msg import Twist, Pose2D
+from vision_msgs.msg import Detection2DArray, Detection2D, BoundingBox2D
 from visualization_msgs.msg import Marker, MarkerArray
-
-@dataclass
-class CircleObstacle:
-    """
-    Circle obstacle used in the obstacle map.
-    """
-
-    center: np.ndarray
-    radius: float
-
-    def __init__(self, center: np.ndarray, radius: float) -> None:
-        self.center = center
-        self.radius = radius
 
 @dataclass
 class RectangleObstacle:
@@ -39,7 +27,6 @@ class RectangleObstacle:
     Rectangle obstacle used in the obstacle map.
     Not consider angle for now.
     """
-
     center: np.ndarray
     width: float
     height: float
@@ -51,12 +38,10 @@ class RectangleObstacle:
         self.height = height
         self.angle = 0.0
 
-
 class ObstacleMap:
     """
     Obstacle map represented by a grid.
     """
-
     def __init__(
         self,
         map_size: Tuple[int, int] = (20, 20),
@@ -102,69 +87,73 @@ class ObstacleMap:
 
         # Inner variables
         self._map_torch: torch.Tensor = None  # use to collision check on GPU
-        self.circle_obs_list: List[CircleObstacle] = []  # use to visualize
         self.rectangle_obs_list: List[RectangleObstacle] = []  # use to visualize
 
-    def add_circle_obstacle(self, center: np.ndarray, radius: float) -> None:
-        """
-        Add a circle obstacle to the map.
-        :param center: Center of the circle obstacle.
-        :param radius: Radius of the circle obstacle.
-        """
-        assert len(center) == 2
-        assert radius > 0
-
-        # convert to cell map
-        center_occ = (center / self._cell_size) + self._cell_map_origin
-        center_occ = np.round(center_occ).astype(int)
-        radius_occ = ceil(radius / self._cell_size)
-
-        # add to occ map
-        for i in range(-radius_occ, radius_occ + 1):
-            for j in range(-radius_occ, radius_occ + 1):
-                if i**2 + j**2 <= radius_occ**2:
-                    i_bounded = np.clip(center_occ[0] + i, 0, self._map.shape[0] - 1)
-                    j_bounded = np.clip(center_occ[1] + j, 0, self._map.shape[1] - 1)
-                    self._map[i_bounded, j_bounded] = 1
-
-        # add to circle obstacle list to use visualize
-        self.circle_obs_list.append(CircleObstacle(center, radius))
-
     def add_rectangle_obstacle(
-        self, center: np.ndarray, width: float, height: float
+        self, center: np.ndarray, width: float, height: float, angle: float = 0.0
     ) -> None:
         """
         Add a rectangle obstacle to the map.
         :param center: Center of the rectangle obstacle.
         :param width: Width of the rectangle obstacle.
         :param height: Height of the rectangle obstacle.
+        :param angle: Rotation angle in radians (counterclockwise from x-axis).
         """
         assert len(center) == 2
         assert width > 0
         assert height > 0
-
-        # convert to cell map
+        
+        # Convert to cell map coordinates
         center_occ = (center / self._cell_size) + self._cell_map_origin
-        center_occ = np.ceil(center_occ).astype(int)
         width_occ = ceil(width / self._cell_size)
         height_occ = ceil(height / self._cell_size)
+        
+        # Create rotation matrix
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        
+        # Create a bounding box for the rotated rectangle
+        # Calculate corner points
+        half_w, half_h = width_occ/2, height_occ/2
+        corners = np.array([
+            [-half_w, -half_h],
+            [half_w, -half_h],
+            [half_w, half_h],
+            [-half_w, half_h]
+        ])
+        
+        # Rotate corners
+        rotated_corners = np.dot(corners, rot_matrix.T)
+        
+        # Find min/max bounds
+        min_x = np.floor(np.min(rotated_corners[:, 0]))
+        max_x = np.ceil(np.max(rotated_corners[:, 0]))
+        min_y = np.floor(np.min(rotated_corners[:, 1]))
+        max_y = np.ceil(np.max(rotated_corners[:, 1]))
+        
+        # For each cell in the bounding box, check if it's inside the rotated rectangle
+        for x_offset in range(int(min_x), int(max_x + 1)):
+            for y_offset in range(int(min_y), int(max_y + 1)):
+                # Position relative to center
+                rel_pos = np.array([x_offset, y_offset])
+                
+                # Rotate back to check if in original rectangle
+                orig_pos = np.dot(rel_pos, rot_matrix)
+                
+                # Check if inside rectangle
+                if (abs(orig_pos[0]) <= half_w and abs(orig_pos[1]) <= half_h):
+                    # Calculate actual cell coordinates
+                    cell_x = int(center_occ[0] + x_offset)
+                    cell_y = int(center_occ[1] + y_offset)
+                    
+                    # Check bounds
+                    if (0 <= cell_x < self._map.shape[0] and 
+                        0 <= cell_y < self._map.shape[1]):
+                        self._map[cell_x, cell_y] = 1
 
-        # add to occ map
-        x_init = center_occ[0] - ceil(width_occ / 2)
-        x_end = center_occ[0] + ceil(width_occ / 2)
-        y_init = center_occ[1] - ceil(height_occ / 2)
-        y_end = center_occ[1] + ceil(height_occ / 2)
-
-        # # deal with out of bound
-        x_init = np.clip(x_init, 0, self._map.shape[0] - 1)
-        x_end = np.clip(x_end, 0, self._map.shape[0] - 1)
-        y_init = np.clip(y_init, 0, self._map.shape[1] - 1)
-        y_end = np.clip(y_end, 0, self._map.shape[1] - 1)
-
-        self._map[x_init:x_end, y_init:y_end] = 1
-
-        # add to rectangle obstacle list to use visualize
-        self.rectangle_obs_list.append(RectangleObstacle(center, width, height))
+        # Add to rectangle obstacle list for visualization
+        self.rectangle_obs_list.append(RectangleObstacle(center, width, height, angle))
 
     def convert_to_torch(self) -> torch.Tensor:
         self._map_torch = torch.from_numpy(self._map).to(self._device, self._dtype)
@@ -215,37 +204,39 @@ class ObstacleMap:
         ax.set_ylim(self.y_lim)
         ax.set_aspect("equal")
 
-        # render circle obstacles
-        for circle_obs in self.circle_obs_list:
-            ax.add_patch(
-                plt.Circle(
-                    circle_obs.center, circle_obs.radius, color="gray", zorder=zorder
-                )
-            )
-
         # render rectangle obstacles
         for rectangle_obs in self.rectangle_obs_list:
-            ax.add_patch(
-                plt.Rectangle(
-                    rectangle_obs.center
-                    - np.array([rectangle_obs.width / 2, rectangle_obs.height / 2]),
-                    rectangle_obs.width,
-                    rectangle_obs.height,
-                    color="gray",
-                    zorder=zorder,
-                )
+            # Convert angle to degrees for matplotlib
+            angle_degrees = np.degrees(rectangle_obs.angle)
+            
+            # Create rectangle patch with rotation
+            rect = plt.Rectangle(
+                # For rotated rectangles, matplotlib rotates around the bottom-left corner
+                # so we need to adjust the position
+                (rectangle_obs.center[0] - rectangle_obs.width/2, 
+                 rectangle_obs.center[1] - rectangle_obs.height/2),
+                rectangle_obs.width,
+                rectangle_obs.height,
+                angle=angle_degrees,
+                color="gray",
+                zorder=zorder,
             )
-
+            
+            # Apply transform to rotate around center instead of corner
+            t = plt.matplotlib.transforms.Affine2D().rotate_deg_around(
+                rectangle_obs.center[0], rectangle_obs.center[1], angle_degrees)
+            rect.set_transform(t + ax.transData)
+            
+            ax.add_patch(rect)
 
 def generate_random_obstacles(
     obstacle_map: ObstacleMap,
     random_x_range: Tuple[float, float],
     random_y_range: Tuple[float, float],
-    num_circle_obs: int,
-    radius_range: Tuple[float, float],
     num_rectangle_obs: int,
     width_range: Tuple[float, float],
     height_range: Tuple[float, float],
+    angle_range: Tuple[float, float],
     max_iteration: int,
     seed: int,
 ) -> None:
@@ -264,46 +255,6 @@ def generate_random_obstacles(
     if random_y_range[1] > obstacle_map.y_lim[1]:
         random_y_range[1] = obstacle_map.y_lim[1]
 
-    for i in range(num_circle_obs):
-        num_trial = 0
-        while num_trial < max_iteration:
-            center_x = rng.uniform(random_x_range[0], random_x_range[1])
-            center_y = rng.uniform(random_y_range[0], random_y_range[1])
-            center = np.array([center_x, center_y])
-            radius = rng.uniform(radius_range[0], radius_range[1])
-
-            # overlap check
-            is_overlap = False
-            for circle_obs in obstacle_map.circle_obs_list:
-                if (
-                    np.linalg.norm(circle_obs.center - center)
-                    <= circle_obs.radius + radius
-                ):
-                    is_overlap = True
-
-            for rectangle_obs in obstacle_map.rectangle_obs_list:
-                if (
-                    np.linalg.norm(rectangle_obs.center - center)
-                    <= rectangle_obs.width / 2 + radius
-                ):
-                    if (
-                        np.linalg.norm(rectangle_obs.center - center)
-                        <= rectangle_obs.height / 2 + radius
-                    ):
-                        is_overlap = True
-
-            if not is_overlap:
-                break
-
-            num_trial += 1
-
-            if num_trial == max_iteration:
-                raise RuntimeError(
-                    "Cannot generate random obstacles due to reach max iteration."
-                )
-
-        obstacle_map.add_circle_obstacle(center, radius)
-
     for i in range(num_rectangle_obs):
         num_trial = 0
         while num_trial < max_iteration:
@@ -312,53 +263,53 @@ def generate_random_obstacles(
             center = np.array([center_x, center_y])
             width = rng.uniform(width_range[0], width_range[1])
             height = rng.uniform(height_range[0], height_range[1])
-
+            angle = rng.uniform(angle_range[0], angle_range[1])
+            
+            # Compute the bounding radius of the rotated rectangle
+            bounding_radius = np.sqrt((width/2)**2 + (height/2)**2)
+            
             # overlap check
             is_overlap = False
-            for circle_obs in obstacle_map.circle_obs_list:
-                if (
-                    np.linalg.norm(circle_obs.center - center)
-                    <= circle_obs.radius + width / 2
-                ):
-                    if (
-                        np.linalg.norm(circle_obs.center - center)
-                        <= circle_obs.radius + height / 2
-                    ):
-                        is_overlap = True
+            
+            if is_overlap:
+                num_trial += 1
+                continue
 
-            for rectangle_obs in obstacle_map.rectangle_obs_list:
-                if (
-                    np.linalg.norm(rectangle_obs.center - center)
-                    <= rectangle_obs.width / 2 + width / 2
-                ):
-                    if (
-                        np.linalg.norm(rectangle_obs.center - center)
-                        <= rectangle_obs.height / 2 + height / 2
-                    ):
-                        is_overlap = True
-
+            # Check overlap with rectangle obstacles
+            # for rectangle_obs in obstacle_map.rectangle_obs_list:
+            #     # Calculate bounding radius of existing rectangle
+            #     existing_bounding_radius = np.sqrt((rectangle_obs.width/2)**2 + (rectangle_obs.height/2)**2)
+                
+            #     # Check if bounding circles overlap
+            #     if (np.linalg.norm(rectangle_obs.center - center) <= existing_bounding_radius + bounding_radius):
+            #         # For rectangles that might overlap, perform more detailed check
+            #         # This is a conservative check that could be improved with more complex polygon intersection
+            #         # For now, we'll consider it an overlap if bounding circles overlap
+            #         is_overlap = True
+            #         break
+                    
             if not is_overlap:
                 break
 
             num_trial += 1
-
             if num_trial == max_iteration:
                 raise RuntimeError(
                     "Cannot generate random obstacles due to reach max iteration."
                 )
 
-        obstacle_map.add_rectangle_obstacle(center, width, height)
+        obstacle_map.add_rectangle_obstacle(center, width, height, angle)
 
 @torch.jit.script
 def angle_normalize(x):
     return ((x + torch.pi) % (2 * torch.pi)) - torch.pi
-
 
 class Navigation2DEnv:
     def __init__(
         self, device=torch.device("cuda"), dtype=torch.float32, seed: int = 42
     ) -> None:
         rospy.init_node('env_pub_node', anonymous=True)
+        
+        self.pub_timer = rospy.Timer(rospy.Duration(0.1), self.pub_timer_callback)
         
         # Publishers (latching static topics)
         self.global_path_pub = rospy.Publisher('/global_path', Path, queue_size=1, latch=True)
@@ -379,32 +330,31 @@ class Navigation2DEnv:
             map_size=(20, 20), cell_size=0.1, device=self._device, dtype=self._dtype
         )
         self._seed = seed
+        
+        
 
         generate_random_obstacles(
             obstacle_map=self._obstacle_map,
             random_x_range=(-7.5, 7.5),
             random_y_range=(-7.5, 7.5),
-            num_circle_obs=10,
-            radius_range=(0.5, 0.5),
             num_rectangle_obs=5,
             width_range=(3, 5),
             height_range=(3, 5),
+            angle_range=(-np.pi / 4, np.pi / 4),
             max_iteration=1000,
             seed=seed,
         )
         # self._obstacle_map.convert_to_torch()
-        
-        
-        
 
         self._start_pos = torch.tensor(
-            [-9.0, -9.0], device=self._device, dtype=self._dtype
+            [-0.0, -9.0], device=self._device, dtype=self._dtype
         )
         self._goal_pos = torch.tensor(
-            [9.0, 9.0], device=self._device, dtype=self._dtype
+            [0.0, 9.0], device=self._device, dtype=self._dtype
         )
 
         self._robot_state = torch.zeros(3, device=self._device, dtype=self._dtype)
+        
         self._robot_state[:2] = self._start_pos
         self._robot_state[2] = angle_normalize(
             torch.atan2(
@@ -413,9 +363,11 @@ class Navigation2DEnv:
             )
         )
 
-        # u: [v, omega] (m/s, rad/s)
-        self.u_min = torch.tensor([0.0, -1.0], device=self._device, dtype=self._dtype)
-        self.u_max = torch.tensor([2.0, 1.0], device=self._device, dtype=self._dtype)
+        # u: [accel, steer] (m/s2, rad)
+        self.u_min = torch.tensor([-1.3, -0.3], device=self._device, dtype=self._dtype)
+        self.u_max = torch.tensor([3.0, 0.3], device=self._device, dtype=self._dtype)
+        self.L = torch.tensor(3, device=self._device, dtype=self._dtype)
+        self.V_MAX = torch.tensor(11.0, device=self._device, dtype=self._dtype)
 
     def reset(self) -> torch.Tensor:
         """
@@ -431,13 +383,13 @@ class Navigation2DEnv:
             )
         )
 
-        self._fig = plt.figure(layout="tight")
-        self._ax = self._fig.add_subplot()
-        self._ax.set_xlim(self._obstacle_map.x_lim)
-        self._ax.set_ylim(self._obstacle_map.y_lim)
-        self._ax.set_aspect("equal")
+        # self._fig = plt.figure(layout="tight")
+        # self._ax = self._fig.add_subplot()
+        # self._ax.set_xlim(self._obstacle_map.x_lim)
+        # self._ax.set_ylim(self._obstacle_map.y_lim)
+        # self._ax.set_aspect("equal")
 
-        self._rendered_frames = []
+        # self._rendered_frames = []
 
         return self._robot_state
 
@@ -456,97 +408,12 @@ class Navigation2DEnv:
         ).squeeze(0)
 
         # goal check
-        goal_threshold = 0.5
+        goal_threshold = 0.01
         is_goal_reached = (
             torch.norm(self._robot_state[:2] - self._goal_pos) < goal_threshold
         )
 
         return self._robot_state, is_goal_reached
-
-    def render(
-        self,
-        predicted_trajectory: torch.Tensor = None,
-        is_collisions: torch.Tensor = None,
-        top_samples: Tuple[torch.Tensor, torch.Tensor] = None,
-        mode: str = "human",
-    ) -> None:
-        self._ax.set_xlabel("x [m]")
-        self._ax.set_ylabel("y [m]")
-
-        # obstacle map
-        self._obstacle_map.render(self._ax, zorder=10)
-
-        # start and goal
-        self._ax.scatter(
-            self._start_pos[0].item(),
-            self._start_pos[1].item(),
-            marker="o",
-            color="red",
-            zorder=10,
-        )
-        self._ax.scatter(
-            self._goal_pos[0].item(),
-            self._goal_pos[1].item(),
-            marker="o",
-            color="orange",
-            zorder=10,
-        )
-
-        # robot
-        self._ax.scatter(
-            self._robot_state[0].item(),
-            self._robot_state[1].item(),
-            marker="o",
-            color="green",
-            zorder=100,
-        )
-
-        # visualize top samples with different alpha based on weights
-        if top_samples is not None:
-            top_samples, top_weights = top_samples
-            top_samples = top_samples.cpu().numpy()
-            top_weights = top_weights.cpu().numpy()
-            top_weights = 0.7 * top_weights / np.max(top_weights)
-            top_weights = np.clip(top_weights, 0.1, 0.7)
-            for i in range(top_samples.shape[0]):
-                self._ax.plot(
-                    top_samples[i, :, 0],
-                    top_samples[i, :, 1],
-                    color="lightblue",
-                    alpha=top_weights[i],
-                    zorder=1,
-                )
-
-        # predicted trajectory
-        if predicted_trajectory is not None:
-            # if is collision color is red
-            colors = np.array(["darkblue"] * predicted_trajectory.shape[1])
-            if is_collisions is not None:
-                is_collisions = is_collisions.cpu().numpy()
-                is_collisions = np.any(is_collisions, axis=0)
-                colors[is_collisions] = "red"
-
-            self._ax.scatter(
-                predicted_trajectory[0, :, 0].cpu().numpy(),
-                predicted_trajectory[0, :, 1].cpu().numpy(),
-                color=colors,
-                marker="o",
-                s=3,
-                zorder=2,
-            )
-
-        if mode == "human":
-            # online rendering
-            plt.pause(0.001)
-            plt.cla()
-        elif mode == "rgb_array":
-            # offline rendering for video
-            # TODO: high resolution rendering
-            self._fig.canvas.draw()
-            data = np.frombuffer(self._fig.canvas.tostring_rgb(), dtype=np.uint8)
-            data = data.reshape(self._fig.canvas.get_width_height()[::-1] + (3,))
-            plt.cla()
-            self._rendered_frames.append(data)
 
     def dynamics(
         self, state: torch.Tensor, action: torch.Tensor, delta_t: float = 0.1
@@ -554,8 +421,8 @@ class Navigation2DEnv:
         """
         Update robot state based on differential drive dynamics.
         Args:
-            state (torch.Tensor): state batch tensor, shape (batch_size, 3) [x, y, theta]
-            action (torch.Tensor): control batch tensor, shape (batch_size, 2) [v, omega]
+            state (torch.Tensor): state batch tensor, shape (batch_size, 3) [x, y, theta, v]
+            action (torch.Tensor): control batch tensor, shape (batch_size, 2) [accel, steer]
             delta_t (float): time step interval [s]
         Returns:
             torch.Tensor: shape (batch_size, 3) [x, y, theta]
@@ -565,13 +432,20 @@ class Navigation2DEnv:
         x = state[:, 0].view(-1, 1)
         y = state[:, 1].view(-1, 1)
         theta = state[:, 2].view(-1, 1)
-        v = torch.clamp(action[:, 0].view(-1, 1), self.u_min[0], self.u_max[0])
-        omega = torch.clamp(action[:, 1].view(-1, 1), self.u_min[1], self.u_max[1])
+        v = state[:, 3].view(-1, 1)
+        accel = torch.clamp(action[:, 0].view(-1, 1), self.u_min[0], self.u_max[0])
+        steer = torch.clamp(action[:, 1].view(-1, 1), self.u_min[1], self.u_max[1])
         theta = angle_normalize(theta)
 
-        new_x = x + v * torch.cos(theta) * delta_t
-        new_y = y + v * torch.sin(theta) * delta_t
-        new_theta = angle_normalize(theta + omega * delta_t)
+        dx = v * torch.cos(theta)
+        dy = v * torch.sin(theta)
+        dv = accel
+        dtheta = v * torch.tan(steer) / self.L
+
+        new_x = x + dx * delta_t
+        new_y = y + dy * delta_t
+        new_theta = angle_normalize(theta + dtheta * delta_t)
+        new_v = v + dv * delta_t
 
         # Clamp x and y to the map boundary
         x_lim = torch.tensor(
@@ -582,8 +456,10 @@ class Navigation2DEnv:
         )
         clamped_x = torch.clamp(new_x, x_lim[0], x_lim[1])
         clamped_y = torch.clamp(new_y, y_lim[0], y_lim[1])
+        clamped_v = torch.clamp(new_v, -self.V_MAX, self.V_MAX)
 
-        result = torch.cat([clamped_x, clamped_y, new_theta], dim=1)
+
+        result = torch.cat([clamped_x, clamped_y, new_theta, clamped_v], dim=1)
 
         return result
 
@@ -620,18 +496,102 @@ class Navigation2DEnv:
         is_collisions = self._obstacle_map.compute_cost(pos_batch).squeeze(1)
         return is_collisions
 
-    def pub_obstacle_info(self):
-        # Publish obstacle information
-        detection_array = Detection2DArray()
-        detection_array.detections = []
-        for obs in self._obstacle_map.obstacles:
+    def pub_obstacle(self):
+        # Publish obstacle information to /obstacle_info, /obstacle_markers topic, 
+        
+        obstacle_info = Detection2DArray()
+        obstacle_info.header.stamp = rospy.Time.now()
+        obstacle_info.header.frame_id = 'map'
+        
+        for i in range(len(self._obstacle_map.rectangle_obs_list)):
+            obs = self._obstacle_map.rectangle_obs_list[i]
+            
+            # Create Detection2D message
             detection = Detection2D()
-            detection.bbox.center.x = obs[0]
-            detection.bbox.center.y = obs[1]
-            detection.bbox.size_x = obs[2]
-            detection.bbox.size_y = obs[3]
-            detection_array.detections.append(detection)
-        self.obstacle_info_pub.publish(detection_array)
+            detection.header.stamp = rospy.Time.now()
+            detection.header.frame_id = 'map'
+            
+            detection_center = Pose2D()
+            detection_center.x = obs.center[0]
+            detection_center.y = obs.center[1]
+            detection_center.theta = obs.angle
+            
+            bbox = BoundingBox2D()
+            bbox.center = detection_center
+            bbox.size_x = obs.width
+            bbox.size_y = obs.height
+            
+            detection.bbox = bbox
+            detection.results.append()
+            obstacle_info.detections.append(detection)
+            
+            
+            # Create Marker message
+            marker = Marker()
+            marker.header.frame_id = 'map'
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = 'obstacle_markers'
+            marker.id = i
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            marker.pose.position.x = obs.center[0]
+            marker.pose.position.y = obs.center[1]
+            marker.pose.position.z = 0.5
+            
+            # Convert angle to quaternion
+            q = tf.transformations.quaternion_from_euler(0, 0, obs.angle)
+            marker.pose.orientation.x = q[0]
+            marker.pose.orientation.y = q[1]
+            marker.pose.orientation.z = q[2]
+            marker.pose.orientation.w = q[3]
+            
+            marker.scale.x = obs.width
+            marker.scale.y = obs.height
+            marker.scale.z = 1.0
+            marker.color.a = 1.0
+            marker.color.r = 0.0
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            
+        self.obstacle_info_pub.publish(obstacle_info)
+        self.obstacle_marker_pub.publish(MarkerArray([marker]))
+            
+    def pub_state(self):
+        # Publish vehicle state to /vehicle_state topic
+        
+        vehicle_state = Odometry()
+        vehicle_state.header.stamp = rospy.Time.now()
+        vehicle_state.header.frame_id = 'map'
+        
+        vehicle_state.pose.pose.position.x = self._robot_state[0].item()
+        vehicle_state.pose.pose.position.y = self._robot_state[1].item()
+        
+        q = tf.transformations.quaternion_from_euler(0, 0, self._robot_state[2].item())
+        vehicle_state.pose.pose.orientation.x = q[0]
+        vehicle_state.pose.pose.orientation.y = q[1]
+        vehicle_state.pose.pose.orientation.z = q[2]
+        vehicle_state.pose.pose.orientation.w = q[3]
+        
+        self.vehicle_state_pub.publish(vehicle_state)
+    
+    def pub_global_path(self):
+        # Publish global path to /global_path topic
+        
+        global_path = Path()
+        global_path.header.stamp = rospy.Time.now()
+        global_path.header.frame_id = 'map'
+        
+        # Create path points
+        num_points = 100
+    
+    def pub_timer_callback(self, event):
+        self.pub_obstacle()
+        self.pub_state()
+        
+        
+     
+        
+        
          
         
 

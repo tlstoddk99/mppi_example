@@ -47,12 +47,6 @@ class racing_controller:
         self.Qo = 10000.0  # obstacle cost
         self.Qin = 0.01  # input cost
         self.Qdin = 0.5  # differential input cost
-
-        # # device and dtype
-        # if torch.cuda.is_available() and device == torch.device("cuda"):
-        #     self._device = torch.device("cuda")
-        # else:
-        #     self._device = torch.device("cpu")
         
         self._device = device
         
